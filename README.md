@@ -1,0 +1,248 @@
+# MiniDB
+
+MiniDB is a self-contained embedded database library implemented in C++20 from
+the design in [`doc/minidb-design.md`](doc/minidb-design.md). A database is a
+folder in which every relation (including the system catalog relations) owns a
+`<name>.dat` data file and a `<name>.fsm` free-space-map file. It exposes a
+small SQLite-like C API. The current implementation covers the storage engine
+and the DDL/DML subset needed to create and populate the TPC-H schema in
+[`test/tpc-h/schema.sql`](test/tpc-h/schema.sql), and it ships with an
+interactive shell, an embedded demo and integration tests.
+
+No third-party libraries are required.
+
+## What is implemented
+
+| Layer | Design doc | Implementation |
+| --- | --- | --- |
+| Page / file format, CRC32C | ch. 4 | 8 KB pages, 32-byte header, 64-page (512 KB) extents, page-1 extent bitmap |
+| Disk manager | ch. 4 | read/write/fsync, page checksums, file header at page 0 |
+| Buffer pool | ch. 8 | configurable frames, CLOCK replacer, pin counts, page latches (`std::shared_mutex`), RAII read/write guards; one pool spans every data/FSM file, keyed by `(file_id, page_id)` |
+| Segments / extents | ch. 5, 7 | segment header, inline extent list, overflow extent-list pages, per-extent page bitmaps; one external `<name>.fsm` file per relation |
+| Heap storage | ch. 6 | slotted pages, variable-length records, forwarding pointers, page compaction |
+| Catalog | ch. 7 | bootstrapped `sys_tables` / `sys_columns` heap relations, visible as read-only system tables |
+| Transactions | ch. 9 (exp1 scope) | transaction IDs, auto-commit per statement; no WAL or recovery yet |
+| SQL | ch. 10 | `CREATE TABLE`, `DROP TABLE`, `INSERT`, `DELETE`, `SELECT`, `SHOW TABLES`, `DESCRIBE` |
+| C API | ch. 2.3 | `mydb_open` / `mydb_exec` / `mydb_prepare` / `mydb_step` / `mydb_close` |
+
+The parser understands the real TPC-H DDL, including `CHAR(n)`, `VARCHAR(n)`,
+`DECIMAL(p,s)`, `DATE`, `NOT NULL`, inline and table-level `PRIMARY KEY`, and
+ignores `FOREIGN KEY` constraints. Comments (`--` and `/* ... */`) are
+supported.
+
+## Build
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+Or use the presets:
+
+```sh
+cmake --preset dev
+cmake --build --preset dev
+```
+
+Build products:
+
+* `build/libminidb.so` and `build/libminidb_core.a` — the library
+* `build/minidb_shell` — interactive shell / script runner
+* `build/minidb_demo` — embedded API demo
+* `build/minidb_tests` — integration tests
+
+## Database folder layout
+
+Passing a path to `mydb_open` names a **folder**. If the folder does not exist
+(or is empty) MiniDB bootstraps a new database; otherwise it opens the existing
+catalog. One table and one FSM file are created per relation:
+
+```
+tpch_db/
+  sys_tables.dat    sys_tables.fsm     # catalog: relation metadata
+  sys_columns.dat   sys_columns.fsm    # catalog: column metadata
+  nation.dat        nation.fsm
+  region.dat        region.fsm
+  supplier.dat      supplier.fsm
+  ...
+```
+
+`sys_tables(table_id, name, data_file, fsm_file, segment_header_page,
+column_count, is_system)` and `sys_columns(table_id, ordinal, name, type,
+length, scale, nullable)` are ordinary heap relations stored in their own
+files. They appear in `SHOW TABLES` and can be queried/`DESCRIBE`d like user
+tables, but `INSERT` and `DROP` are rejected and the `sys_` name prefix is
+reserved. System relation IDs are 1 and 2; user relation IDs start at 3 and are
+derived from the catalog when reopening.
+
+Every data file has a 512 KB initial extent; page 0 is the file header, page 1
+is the extent bitmap and page 1 of the FSM file onward holds one free-space
+category byte per data page. Deleting a table removes both its `.dat` and
+`.fsm` files. Databases created by the older single-file MiniDB format cannot
+be opened by this version (file header magic/version is `MINIDBF2`).
+
+## Quick start
+
+### Embedded C API
+
+```c
+#include <stdio.h>
+#include "minidb/minidb.h"
+
+int main(void) {
+    mydb_db* db;
+    if (mydb_open("data/tpch_db", NULL, &db) != MYDB_OK) {
+        fprintf(stderr, "%s\n", mydb_last_error());
+        return 1;
+    }
+
+    char* errmsg = NULL;
+    if (mydb_exec(db, "CREATE TABLE t (a INTEGER NOT NULL, b VARCHAR(32));",
+                  &errmsg) != MYDB_OK) {
+        fprintf(stderr, "%s\n", errmsg);
+        mydb_free(errmsg);
+        mydb_close(db);
+        return 1;
+    }
+
+    mydb_prepare(db, "INSERT INTO t VALUES (1, 'hello');", NULL);
+    mydb_stmt* stmt;
+    mydb_prepare(db, "SELECT a, b FROM t;", &stmt);
+    while (mydb_step(stmt) == MYDB_ROW) {
+        printf("%lld %s\n", mydb_column_int64(stmt, 0),
+               mydb_column_text(stmt, 1));
+    }
+    mydb_finalize(stmt);
+    mydb_close(db);
+    return 0;
+}
+```
+
+Compile against the static library:
+
+```sh
+cc app.c -Iinclude -Lbuild -lminidb_core -lstdc++ -lpthread -o app
+```
+
+Link `-lminidb` instead to use the shared library.
+
+### Demo
+
+`examples/demo.cpp` executes the complete TPC-H schema through the C API,
+inspects `sys_tables` to show the generated `.dat`/`.fsm` file names, inserts
+sample `nation`/`region`/`supplier`/`orders` rows, runs prepared queries
+(`SELECT`, `SHOW TABLES`, `DESCRIBE`), deletes rows with and without `WHERE`,
+then closes and reopens the database to show persistence and prints the size of
+the database folder:
+
+```sh
+./build/minidb_demo
+# or choose the database and schema explicitly
+./build/minidb_demo /tmp/tpch_db test/tpc-h/schema.sql
+```
+
+### Shell
+
+```sh
+# execute a script
+./build/minidb_shell --db /tmp/tpch_db --file test/tpc-h/schema.sql
+
+# interactive (or pipe SQL on stdin)
+./build/minidb_shell --db /tmp/tpch_db
+```
+
+Options: `--db <path>`, `--file <path>`, `--buffer <frames>`,
+`--log-level debug|info|warn|error|off`. Interactive commands include
+`.tables`, `.schema <table>`, `.read <file>`, `.quit`.
+
+### Tests
+
+```sh
+ctest --test-dir build --output-on-failure
+```
+
+The integration test uses a tiny 8-frame buffer pool to force page eviction,
+runs the actual TPC-H schema, checks the one-`.dat`-plus-one-`.fsm`-per-relation
+folder layout, queries `sys_tables`/`sys_columns`, verifies that system tables
+are read-only, round-trips `CHAR`, `VARCHAR`, `DECIMAL`, `DATE` and `INTEGER`
+values, exercises `DELETE` with and without `WHERE`, bulk-loads 20,000 rows
+spanning several extents, and checks that schema and data (including deletes)
+survive a close/reopen cycle and that `DROP TABLE` deletes both files.
+
+## SQL subset
+
+```sql
+CREATE TABLE [IF NOT EXISTS] name (
+    col INTEGER | BIGINT | DOUBLE | REAL | FLOAT
+      | CHAR(n) | VARCHAR(n) | DECIMAL(p,s) | DATE
+      [NOT NULL] [PRIMARY KEY] [UNIQUE] [CHECK (...)]
+    [, ...]
+    [, PRIMARY KEY (col, ...)]
+    [, FOREIGN KEY (...) REFERENCES other (...)]
+);
+
+DROP TABLE [IF EXISTS] name;
+
+INSERT INTO name [(col, ...)] VALUES (expr, ...) [, (...)];
+
+DELETE FROM name [WHERE col op literal];
+
+SELECT [* | col, ...] FROM name
+  [WHERE col op literal [AND ...]] [LIMIT n];
+
+SHOW TABLES;
+DESCRIBE name;
+```
+
+`op` is `=`, `<>`/`!=`, `<`, `<=`, `>`, `>=`. `DELETE` without `WHERE` removes
+all rows; empty heap pages are returned to the segment free list. Only
+single-table scans and one comparison per `WHERE` are supported; there are no
+joins, aggregates, indexes or `UPDATE` yet. `PRIMARY KEY` and `FOREIGN KEY`
+clauses are accepted for compatibility and primary-key columns become
+`NOT NULL`, but the constraints are not enforced without an index layer.
+
+`SHOW TABLES`/`DESCRIBE`/`SELECT` also work on `sys_tables` and `sys_columns`;
+these two system relations reject `INSERT`, `DROP TABLE` and the reserved
+`sys_` name prefix.
+
+## Storage mapping notes
+
+* `INTEGER` → 32-bit, `BIGINT`/`LONG` → 64-bit, `FLOAT`/`DOUBLE`/`REAL` →
+  IEEE-754 double, `DATE` → days since the Unix epoch.
+* `CHAR(n)` is stored fixed-width and space-padded; comparisons and output trim
+  trailing spaces.
+* `DECIMAL(p,s)` is stored as a scaled 64-bit integer (`value * 10^s`), which
+  supports precision up to 18. This is the one small format extension beyond
+  the design document: `sys_columns` carries an extra `scale` field so the
+  catalog can reconstruct `DECIMAL(p,s)`.
+* Records have an 18-byte header, a null bitmap, a fixed-length area, a
+  `uint16` end-offset table for `VARCHAR` values and then the variable data.
+* Each relation data/FSM file records a `clean_shutdown` flag in its page-0
+  header. It is cleared when the database opens and set after a clean close; a
+  warning is logged when an existing relation was left dirty. No redo/undo
+  recovery is implemented.
+* Every statement runs in its own auto-commit transaction. The WAL and crash
+  recovery described in later chapters are stubbed out; a crash may leave the
+  database inconsistent, so treat this implementation as educational rather
+  than durable.
+
+## Repository layout
+
+```
+include/minidb/minidb.h   public C API
+src/common/               status, types, CRC32C, logging, date/decimal utils
+src/storage/              page and file formats, disk manager
+src/buffer/               buffer pool, CLOCK replacer, page guards
+src/space/                extents, segments, extent lists, FSM
+src/record/               values, schemas, tuple encoding
+src/table/                slotted heap pages, table heap, iterators
+src/catalog/              system catalog bootstrap and DDL metadata
+src/sql/                  lexer + recursive-descent parser
+src/db/                   statement execution
+src/capi/                 C API wrapper
+tools/shell/              minidb_shell
+examples/demo.cpp         embedded demo
+tests/test_minidb.cpp     integration tests
+doc/minidb-design.md      original design document
+test/tpc-h/               TPC-H schema used by the demo and tests
+```
