@@ -1,5 +1,7 @@
 #include "space/space_manager.h"
 
+#include <algorithm>
+
 #include "common/logger.h"
 
 namespace minidb {
@@ -41,7 +43,7 @@ Result<extent_id_t> SpaceManager::AllocateExtent(Transaction* /*txn*/) {
     if (!persist.ok()) return persist;
   }
 
-  MINIDB_LOG_DEBUG("SPACE") << "file=" << disk_->file_id()
+  MINIDB_LOG_DEBUG("SPACE") << "file=" << disk_->name()
                             << " ALLOC extent=" << extent
                             << " file_extents=" << disk_->header().file_extents;
   return extent;
@@ -61,12 +63,35 @@ Status SpaceManager::FreeExtent(Transaction* /*txn*/, extent_id_t extent) {
   if (extent >= bit_count) {
     return Status(StatusCode::kInvalidArgument, "extent id out of range");
   }
+  if (!TestBit(bitmap, extent)) {
+    return Status(StatusCode::kCorruption,
+                  "extent " + std::to_string(extent) + " is already free");
+  }
   SetBit(bitmap, extent, false);
   const size_t hint = ReadU32(page, kBitmapAllocHintOffset);
   if (extent < hint) WriteU32(page, kBitmapAllocHintOffset, extent);
-  MINIDB_LOG_DEBUG("SPACE") << "file=" << disk_->file_id()
+  MINIDB_LOG_DEBUG("SPACE") << "file=" << disk_->name()
                             << " FREE extent=" << extent;
   return Status::Ok();
+}
+
+Result<ExtentBitmapInfo> SpaceManager::ReadBitmap() {
+  auto guard_result = buffer_pool_.FetchRead(disk_, kBitmapPageId);
+  if (!guard_result.ok()) return guard_result.status();
+  ReadPageGuard guard = guard_result.TakeValue();
+  const std::byte* page = guard.Data();
+  if (GetPageType(page) != PageType::kExtentBitmap) {
+    return Status(StatusCode::kCorruption, "extent bitmap page is invalid");
+  }
+  ExtentBitmapInfo info;
+  info.alloc_hint = ReadU32(page, kBitmapAllocHintOffset);
+  const size_t count =
+      std::min<size_t>(disk_->header().file_extents, BitmapBitCount());
+  info.allocated.resize(count);
+  for (size_t bit = 0; bit < count; ++bit) {
+    info.allocated[bit] = TestBit(page + kBitmapOffset, bit);
+  }
+  return info;
 }
 
 Result<std::unique_ptr<Segment>> SpaceManager::CreateSegment(

@@ -15,14 +15,15 @@ No third-party libraries are required.
 
 | Layer | Design doc | Implementation |
 | --- | --- | --- |
-| Page / file format, CRC32C | ch. 4 | 8 KB pages, 32-byte header, 64-page (512 KB) extents, page-1 extent bitmap |
-| Disk manager | ch. 4 | read/write/fsync, page checksums, file header at page 0 |
+| Page / file format, CRC32C | ch. 4 | 8 KB pages, 32-byte header, 64-page (512 KB) extents, page-1 extent bitmap; CRC32C uses the SSE4.2 instruction when the CPU has it (runtime check, table fallback) |
+| Disk manager | ch. 4 | read/write/fsync, page checksums, file header at page 0, files grown with `fallocate` (falls back to `ftruncate`) |
 | Buffer pool | ch. 8 | configurable frames, CLOCK replacer, pin counts, page latches (`std::shared_mutex`), RAII read/write guards; one pool spans every data/FSM file, keyed by `(file_id, page_id)` |
 | Segments / extents | ch. 5, 7 | segment header, inline extent list, overflow extent-list pages, per-extent page bitmaps; one external `<name>.fsm` file per relation |
-| Heap storage | ch. 6 | slotted pages, variable-length records, forwarding pointers, page compaction |
+| Heap storage | ch. 6 | slotted pages, variable-length records, in-page growth with compaction, one-hop forwarding pointers (`FORWARD`/`MOVED_IN`), page compaction |
 | Catalog | ch. 7 | bootstrapped `sys_tables` / `sys_columns` heap relations, visible as read-only system tables |
 | Transactions | ch. 9 (exp1 scope) | transaction IDs, auto-commit per statement; no WAL or recovery yet |
-| SQL | ch. 10 | `CREATE TABLE`, `DROP TABLE`, `INSERT`, `DELETE`, `SELECT`, `SHOW TABLES`, `DESCRIBE` |
+| SQL | ch. 10, 14 | `CREATE TABLE`, `DROP TABLE`, `INSERT`, `UPDATE`, `DELETE`, `SELECT` (with a `rid` pseudo-column), `COPY ... FROM` bulk load, `SHOW TABLES`, `DESCRIBE` |
+| Introspection | ch. 13 | `PRAGMA` result sets for the buffer pool, extent bitmap, extent lists, FSM, page headers and slot directories; debug logs for misses, evictions, allocation and FSM changes |
 | C API | ch. 2.3 | `mydb_open` / `mydb_exec` / `mydb_prepare` / `mydb_step` / `mydb_close` |
 
 The parser understands the real TPC-H DDL, including `CHAR(n)`, `VARCHAR(n)`,
@@ -49,7 +50,10 @@ Build products:
 * `build/libminidb.so` and `build/libminidb_core.a` — the library
 * `build/minidb_shell` — interactive shell / script runner
 * `build/minidb_demo` — embedded API demo
-* `build/minidb_tests` — integration tests
+* `build/minidb_tests` — integration tests (C API)
+* `build/minidb_storage_tests` — storage-layer tests (internal C++ API)
+* `build/minidb_verify_tpch` — checks a loaded TPC-H database row by row
+  against the `.tbl` files
 
 ## Database folder layout
 
@@ -152,8 +156,46 @@ the database folder:
 ```
 
 Options: `--db <path>`, `--file <path>`, `--buffer <frames>`,
-`--log-level debug|info|warn|error|off`. Interactive commands include
-`.tables`, `.schema <table>`, `.read <file>`, `.quit`.
+`--log-level debug|info|warn|error|off`, `--log-file <path>` (log to a file as
+well as stderr). Scripts (`--file`, `.read`) may mix
+SQL and meta commands. Meta commands are shorthand for SQL, as in sqlite3:
+
+| Command | Runs |
+| --- | --- |
+| `.tables`, `.schema t` | `SHOW TABLES`, `DESCRIBE t` |
+| `.load t file.tbl` | `COPY t FROM 'file.tbl' DELIMITER '\|'` |
+| `.get t page:slot` | `SELECT rid, * FROM t WHERE rid = 'page:slot'` |
+| `.stats`, `.frames` | `PRAGMA buffer_stats`, `PRAGMA buffer_frames` |
+| `.info t`, `.extents t`, `.bitmap t` | `PRAGMA table_info / extents / extent_bitmap` |
+| `.fsm t`, `.free t` | `PRAGMA free_space_summary / free_space` |
+| `.page t p` | `PRAGMA page_header` and `PRAGMA page_slots` |
+| `.flush`, `.log [level]` | `PRAGMA flush`, `PRAGMA log_level [= level]` |
+| `.read f`, `.echo on\|off`, `.timer on\|off`, `.help`, `.quit` | client-side |
+
+### Acceptance demo
+
+[`scripts/demo_supplier.txt`](scripts/demo_supplier.txt) walks through loading
+TPC-H `supplier`, the extent bitmap, extent lists, FSM, slotted pages,
+forwarding on update, page and extent reuse after deletes, and the buffer
+pool. Generate `supplier.tbl` with TPC-H dbgen into `test/tpc-h/` first
+(files there other than `schema.sql` are git-ignored), then:
+
+```sh
+rm -rf /tmp/demo_db
+./build/minidb_shell --db /tmp/demo_db --buffer 64 --file scripts/demo_supplier.txt
+```
+
+[`scripts/load_tpch.txt`](scripts/load_tpch.txt) loads all eight tables (SF1,
+about 8.66 million rows) and prints per-table storage statistics. With the
+course data this takes about 17 s in a Release build (lineitem: 6,001,215 rows
+in 12.6 s) and produces a 1.3 GB database; `minidb_verify_tpch` then confirms
+every row:
+
+```sh
+rm -rf /tmp/tpch_db
+./build-release/minidb_shell --db /tmp/tpch_db --log-level info --file scripts/load_tpch.txt
+./build-release/minidb_verify_tpch /tmp/tpch_db test/tpc-h
+```
 
 ### Tests
 
@@ -164,10 +206,17 @@ ctest --test-dir build --output-on-failure
 The integration test uses a tiny 8-frame buffer pool to force page eviction,
 runs the actual TPC-H schema, checks the one-`.dat`-plus-one-`.fsm`-per-relation
 folder layout, queries `sys_tables`/`sys_columns`, verifies that system tables
-are read-only, round-trips `CHAR`, `VARCHAR`, `DECIMAL`, `DATE` and `INTEGER`
-values, exercises `DELETE` with and without `WHERE`, bulk-loads 20,000 rows
-spanning several extents, and checks that schema and data (including deletes)
-survive a close/reopen cycle and that `DROP TABLE` deletes both files.
+are read-only, round-trips `CHAR`, `VARCHAR`, `FLOAT`, `DECIMAL`, `DATE` and `INTEGER`
+values, exercises `UPDATE` (in-page growth, multi-column, NOT NULL and
+system-table errors) and `DELETE` with and without `WHERE`, bulk-loads 20,000
+rows spanning several extents, grows 500 of them so they move behind forwarding
+pointers, and checks that schema and data survive a close/reopen cycle and that
+`DROP TABLE` deletes both files.
+
+The storage tests cover CRC32C (hardware vs. portable), forwarding (no
+duplicate rows in scans, re-forwarding, collect-then-delete), in-page growth,
+FSM search wrap-around, extent-hole reuse, tolerance of an unwritten FSM page
+after reopen, buffer-pool frame recycling and schema size limits.
 
 ## SQL subset
 
@@ -185,24 +234,53 @@ DROP TABLE [IF EXISTS] name;
 
 INSERT INTO name [(col, ...)] VALUES (expr, ...) [, (...)];
 
+UPDATE name SET col = literal [, col = literal ...] [WHERE col op literal];
+
+COPY name FROM 'file.tbl' [DELIMITER '|'];    -- dbgen's trailing '|' is ignored
+
 DELETE FROM name [WHERE col op literal];
 
-SELECT [* | col, ...] FROM name
-  [WHERE col op literal [AND ...]] [LIMIT n];
+SELECT [* | col | rid, ...] FROM name
+  [WHERE col op literal | WHERE rid = 'page:slot'] [LIMIT n];
+
+PRAGMA name [(arg, ...)] [= value];             -- PRAGMA pragma_list; lists them
 
 SHOW TABLES;
 DESCRIBE name;
 ```
 
 `op` is `=`, `<>`/`!=`, `<`, `<=`, `>`, `>=`. `DELETE` without `WHERE` removes
-all rows; empty heap pages are returned to the segment free list. Only
-single-table scans and one comparison per `WHERE` are supported; there are no
-joins, aggregates, indexes or `UPDATE` yet. `PRIMARY KEY` and `FOREIGN KEY`
+all rows; empty heap pages (except the segment's first heap page) are
+returned to the segment, and an extent whose pages are all free goes back to
+the file's extent bitmap. `UPDATE` keeps every row's RID: a longer row grows in
+its page when the page has room (after compaction), otherwise it moves and the
+original slot keeps a one-hop forwarding pointer. Only single-table scans and
+one comparison per `WHERE` are supported; there are no joins, aggregates or
+indexes yet. `PRIMARY KEY` and `FOREIGN KEY`
 clauses are accepted for compatibility and primary-key columns become
 `NOT NULL`, but the constraints are not enforced without an index layer.
 
+`rid` is a pseudo-column (`"page:slot"`, like PostgreSQL's `ctid`): `SELECT rid,
+* FROM t LIMIT 5` shows record ids and `WHERE rid = '65:0'` looks one up,
+following a forwarding pointer if the row has moved.
+
+`COPY` loads a delimited file inside the engine (about 500k rows/s for
+lineitem-shaped rows in a Release build), reports the file and line of a bad
+record, and returns a summary with buffer-pool counters for the load.
+
+| PRAGMA | Shows |
+| --- | --- |
+| `buffer_stats`, `buffer_frames` | pool counters and hit rate; every occupied frame |
+| `table_info(t)` | files, extents, pages, rows, forwarded rows, fill factor |
+| `extents(t)` | extent list with a per-page allocation mask, including holes |
+| `extent_bitmap(t)` | the data file's extent bitmap |
+| `free_space(t)`, `free_space_summary(t)` | FSM per page (vs. actual free bytes), histogram |
+| `page_header(t, p)`, `page_slots(t, p)` | page header fields and slot directory |
+| `flush`, `log_level [= level]` | write back dirty pages; show/set logging |
+
 `SHOW TABLES`/`DESCRIBE`/`SELECT` also work on `sys_tables` and `sys_columns`;
-these two system relations reject `INSERT`, `DROP TABLE` and the reserved
+these two system relations reject `INSERT`, `UPDATE`, `DELETE`, `DROP TABLE`
+and the reserved
 `sys_` name prefix.
 
 ## Storage mapping notes
@@ -238,11 +316,17 @@ src/record/               values, schemas, tuple encoding
 src/table/                slotted heap pages, table heap, iterators
 src/catalog/              system catalog bootstrap and DDL metadata
 src/sql/                  lexer + recursive-descent parser
-src/db/                   statement execution
+src/db/                   statement execution, COPY, PRAGMA
 src/capi/                 C API wrapper
 tools/shell/              minidb_shell
 examples/demo.cpp         embedded demo
 tests/test_minidb.cpp     integration tests
+tests/test_storage.cpp    storage-layer tests
+scripts/demo_supplier.txt acceptance demo script
+scripts/load_tpch.txt     loads all eight TPC-H tables
 doc/minidb-design.md      original design document
-test/tpc-h/               TPC-H schema used by the demo and tests
+test/tpc-h/schema.sql     TPC-H schema from the experiment handout (FLOAT
+                          prices) used by the demo and
+                          tests; other files under test/ (e.g. *.tbl) are
+                          git-ignored
 ```

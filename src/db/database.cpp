@@ -1,10 +1,13 @@
 #include "db/database.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
+#include <sstream>
 #include <utility>
 
 #include "common/logger.h"
@@ -12,6 +15,9 @@
 
 namespace minidb {
 namespace {
+
+constexpr const char* kRidColumn = "rid";
+constexpr size_t kRidProjection = static_cast<size_t>(-1);
 
 Result<int64_t> LiteralToInteger(const Literal& literal) {
   switch (literal.kind) {
@@ -279,6 +285,12 @@ Status Database::ExecuteStatement(Statement* statement, Transaction* txn,
       return ExecuteInsert(statement, txn, result);
     case StatementType::kDelete:
       return ExecuteDelete(statement, txn, result);
+    case StatementType::kUpdate:
+      return ExecuteUpdate(statement, txn, result);
+    case StatementType::kCopy:
+      return ExecuteCopy(statement, txn, result);
+    case StatementType::kPragma:
+      return ExecutePragma(statement, txn, result);
     case StatementType::kSelect:
       return ExecuteSelect(statement, txn, result);
     case StatementType::kShowTables:
@@ -456,6 +468,7 @@ Status Database::ExecuteDelete(Statement* statement, Transaction* txn,
     }
     matches.push_back(rid);
   }
+  if (!iterator.status().ok()) return iterator.status();
 
   int deleted = 0;
   for (const RID& target : matches) {
@@ -469,6 +482,97 @@ Status Database::ExecuteDelete(Statement* statement, Transaction* txn,
   return Status::Ok();
 }
 
+Status Database::ExecuteUpdate(Statement* statement, Transaction* txn,
+                               QueryResult* result) {
+  auto table_result = catalog_->GetTable(statement->table_name);
+  if (!table_result.ok()) return table_result.status();
+  TableInfo* table = table_result.value();
+  if (table->is_system) {
+    return Status(StatusCode::kInvalidArgument,
+                  "system table " + table->name + " is read-only");
+  }
+  const Schema& schema = table->schema;
+  const UpdateSpec& spec = statement->update;
+
+  std::vector<std::pair<size_t, Value>> assignments;
+  for (const Assignment& assignment : spec.assignments) {
+    const int index = schema.IndexOf(assignment.column);
+    if (index < 0) {
+      return Status(StatusCode::kNotFound,
+                    "column " + assignment.column + " does not exist in table " +
+                        table->name);
+    }
+    for (const auto& existing : assignments) {
+      if (existing.first == static_cast<size_t>(index)) {
+        return Status(StatusCode::kInvalidArgument,
+                      "column " + assignment.column + " assigned twice");
+      }
+    }
+    const Column& column = schema.GetColumn(static_cast<size_t>(index));
+    auto value = LiteralToValue(assignment.value, column);
+    if (!value.ok()) {
+      return Status(value.status().code(),
+                    value.status().message() + " (column " + column.name + ")");
+    }
+    assignments.emplace_back(static_cast<size_t>(index), value.TakeValue());
+  }
+
+  int where_index = -1;
+  Value where_value;
+  if (spec.has_where) {
+    where_index = schema.IndexOf(spec.where_column);
+    if (where_index < 0) {
+      return Status(StatusCode::kNotFound,
+                    "column " + spec.where_column + " does not exist");
+    }
+    auto converted =
+        LiteralToValue(spec.where_value, schema.GetColumn(where_index));
+    if (!converted.ok()) return converted.status();
+    where_value = converted.TakeValue();
+    if (where_value.IsNull()) {
+      return Status(StatusCode::kInvalidArgument,
+                    "WHERE NULL is not supported");
+    }
+  }
+
+  // Collect first, like DELETE: an update may move a row to a later page,
+  // and the scan must not see it twice (or hold a guard we need to write).
+  std::vector<std::pair<RID, Tuple>> matches;
+  auto iterator = table->heap->Scan(txn);
+  RID rid;
+  Tuple tuple;
+  while (iterator.Next(&rid, &tuple)) {
+    if (where_index >= 0) {
+      auto decoded = Tuple::Decode(schema, tuple.data().data(), tuple.size());
+      if (!decoded.ok()) return decoded.status();
+      if (!Matches(decoded.value()[static_cast<size_t>(where_index)],
+                   spec.where_op, where_value)) {
+        continue;
+      }
+    }
+    matches.emplace_back(rid, std::move(tuple));
+  }
+  if (!iterator.status().ok()) return iterator.status();
+
+  int updated = 0;
+  for (const auto& [target, old_tuple] : matches) {
+    auto decoded =
+        Tuple::Decode(schema, old_tuple.data().data(), old_tuple.size());
+    if (!decoded.ok()) return decoded.status();
+    std::vector<Value> values = decoded.TakeValue();
+    for (const auto& [index, value] : assignments) values[index] = value;
+    auto new_tuple = Tuple::FromValues(schema, values);
+    if (!new_tuple.ok()) return new_tuple.status();
+    auto status = table->heap->Update(txn, target, new_tuple.value());
+    if (!status.ok()) return status.status();
+    ++updated;
+  }
+  result->changes = updated;
+  result->message = "UPDATE " + std::to_string(updated) + " row(s) in " +
+                    table->name;
+  return Status::Ok();
+}
+
 Status Database::ExecuteSelect(Statement* statement, Transaction* txn,
                                QueryResult* result) {
   auto table_result = catalog_->GetTable(statement->table_name);
@@ -477,11 +581,26 @@ Status Database::ExecuteSelect(Statement* statement, Transaction* txn,
   const Schema& schema = table->schema;
   const SelectSpec& spec = statement->select;
 
+  // "rid" is a pseudo-column ("page:slot", like PostgreSQL's ctid) unless the
+  // table has a real column with that name.
+  const bool has_rid_column = schema.IndexOf(kRidColumn) >= 0;
+  const auto is_rid = [&](const std::string& name) {
+    return !has_rid_column && ToLower(name) == kRidColumn;
+  };
+
   std::vector<size_t> projection;
   if (spec.star) {
     for (size_t i = 0; i < schema.num_columns(); ++i) projection.push_back(i);
   } else {
     for (const std::string& name : spec.columns) {
+      if (name == "*") {
+        for (size_t i = 0; i < schema.num_columns(); ++i) projection.push_back(i);
+        continue;
+      }
+      if (is_rid(name)) {
+        projection.push_back(kRidProjection);
+        continue;
+      }
       const int index = schema.IndexOf(name);
       if (index < 0) {
         return Status(StatusCode::kNotFound,
@@ -492,8 +611,45 @@ Status Database::ExecuteSelect(Statement* statement, Transaction* txn,
     }
   }
   for (size_t index : projection) {
-    result->columns.push_back({schema.GetColumn(index).name,
-                               schema.GetColumn(index).type});
+    if (index == kRidProjection) {
+      result->columns.push_back({kRidColumn, TypeId::kVarchar});
+    } else {
+      result->columns.push_back({schema.GetColumn(index).name,
+                                 schema.GetColumn(index).type});
+    }
+  }
+  const auto emit = [&](RID rid, const std::vector<Value>& values) {
+    std::vector<Value> row;
+    row.reserve(projection.size());
+    for (size_t index : projection) {
+      row.push_back(index == kRidProjection ? Value::String(FormatRid(rid))
+                                            : values[index]);
+    }
+    result->rows.push_back(std::move(row));
+  };
+
+  // WHERE rid = 'page:slot' is a direct lookup instead of a scan.
+  if (spec.has_where && is_rid(spec.where_column)) {
+    if (spec.where_op != "=" ||
+        spec.where_value.kind != Literal::Kind::kString) {
+      return Status(StatusCode::kInvalidArgument,
+                    "only rid = 'page:slot' is supported");
+    }
+    auto rid = ParseRid(spec.where_value.text);
+    if (!rid.ok()) return rid.status();
+    auto tuple = table->heap->Get(txn, rid.value());
+    if (!tuple.ok()) {
+      if (tuple.status().code() == StatusCode::kNotFound) {
+        return Status::Ok();  // no such row: empty result
+      }
+      return tuple.status();
+    }
+    if (spec.limit == 0) return Status::Ok();
+    auto decoded = Tuple::Decode(schema, tuple.value().data().data(),
+                                 tuple.value().size());
+    if (!decoded.ok()) return decoded.status();
+    emit(rid.value(), decoded.value());
+    return Status::Ok();
   }
 
   int where_index = -1;
@@ -529,12 +685,127 @@ Status Database::ExecuteSelect(Statement* statement, Transaction* txn,
                  where_value)) {
       continue;
     }
-    std::vector<Value> row;
-    row.reserve(projection.size());
-    for (size_t index : projection) row.push_back(values[index]);
-    result->rows.push_back(std::move(row));
+    emit(rid, values);
     ++emitted;
   }
+  if (!iterator.status().ok()) return iterator.status();
+  return Status::Ok();
+}
+
+Status Database::ExecuteCopy(Statement* statement, Transaction* txn,
+                             QueryResult* result) {
+  auto table_result = catalog_->GetTable(statement->table_name);
+  if (!table_result.ok()) return table_result.status();
+  TableInfo* table = table_result.value();
+  if (table->is_system) {
+    return Status(StatusCode::kInvalidArgument,
+                  "system table " + table->name + " is read-only");
+  }
+  const Schema& schema = table->schema;
+  const CopySpec& spec = statement->copy;
+  std::ifstream input(spec.path, std::ios::binary);
+  if (!input) {
+    return Status(StatusCode::kIoError, "cannot read " + spec.path);
+  }
+
+  const BufferStats before = pool_->Stats();
+  const uint32_t pages_before = table->segment->page_count();
+  const auto start = std::chrono::steady_clock::now();
+  std::string line;
+  std::vector<std::string> fields;
+  int64_t line_number = 0;
+  int64_t loaded = 0;
+  while (std::getline(input, line)) {
+    ++line_number;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.empty()) continue;
+    fields.clear();
+    size_t begin = 0;
+    for (;;) {
+      const size_t end = line.find(spec.delimiter, begin);
+      if (end == std::string::npos) {
+        fields.push_back(line.substr(begin));
+        break;
+      }
+      fields.push_back(line.substr(begin, end - begin));
+      begin = end + 1;
+    }
+    // dbgen ends every line with a delimiter (design doc 14.2).
+    if (fields.size() == schema.num_columns() + 1 && fields.back().empty()) {
+      fields.pop_back();
+    }
+    const auto fail = [&](const Status& status) {
+      return Status(status.code(),
+                    spec.path + ":" + std::to_string(line_number) + ": " +
+                        status.message() + " (" + std::to_string(loaded) +
+                        " row(s) loaded before the error are kept)");
+    };
+    if (fields.size() != schema.num_columns()) {
+      return fail(Status(StatusCode::kInvalidArgument,
+                         "expected " + std::to_string(schema.num_columns()) +
+                             " fields, got " + std::to_string(fields.size())));
+    }
+    std::vector<Value> values(schema.num_columns());
+    for (size_t i = 0; i < fields.size(); ++i) {
+      const Column& column = schema.GetColumn(i);
+      if (fields[i].empty() && column.nullable) {
+        values[i] = Value::Null();
+        continue;
+      }
+      Literal literal;
+      literal.kind = Literal::Kind::kString;
+      literal.text = std::move(fields[i]);
+      auto value = LiteralToValue(literal, column);
+      if (!value.ok()) {
+        return fail(Status(value.status().code(), value.status().message() +
+                                                      " (column " +
+                                                      column.name + ")"));
+      }
+      values[i] = value.TakeValue();
+    }
+    auto tuple = Tuple::FromValues(schema, values);
+    if (!tuple.ok()) return fail(tuple.status());
+    auto rid = table->heap->Insert(txn, tuple.value());
+    if (!rid.ok()) return fail(rid.status());
+    ++loaded;
+    if (loaded % 100000 == 0) {
+      MINIDB_LOG_INFO("LOAD") << table->name << " rows=" << loaded
+                              << " pages=" << table->segment->page_count()
+                              << " hit_rate="
+                              << std::round(pool_->Stats().HitRate() * 100) / 100
+                              << "%";
+    }
+  }
+  if (input.bad()) return Status(StatusCode::kIoError, "error reading " + spec.path);
+
+  const double seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  const BufferStats& after = pool_->Stats();
+  const uint64_t hit = after.hit - before.hit;
+  const uint64_t miss = after.miss - before.miss;
+  std::ostringstream message;
+  message.setf(std::ios::fixed);
+  message.precision(3);
+  message << "COPY " << loaded << " row(s) into " << table->name << " in "
+          << seconds << " s";
+  if (seconds > 0) {
+    message << " (" << static_cast<int64_t>(loaded / seconds) << " rows/s)";
+  }
+  message << "; pages " << pages_before << " -> "
+          << table->segment->page_count() << ", file "
+          << table->data_disk->header().file_extents << " extent(s)"
+          << "; buffer hit=" << hit << " miss=" << miss
+          << " evict=" << after.evict - before.evict
+          << " flush=" << after.flush - before.flush
+          << " new_page=" << after.new_page - before.new_page;
+  if (hit + miss > 0) {
+    message.precision(2);
+    message << " hit_rate=" << 100.0 * hit / (hit + miss) << "%";
+  }
+  MINIDB_LOG_INFO("LOAD") << message.str();
+  result->changes = static_cast<int>(loaded);
+  result->message = message.str();
   return Status::Ok();
 }
 

@@ -22,8 +22,10 @@ class TableHeap {
    public:
     Iterator() = default;
 
-    // Returns true and fills *rid / *tuple for each visible record.
+    // Returns true and fills *rid / *tuple for each visible record. Returns
+    // false at the end of the table or on error; check status() afterwards.
     bool Next(RID* rid, Tuple* tuple);
+    const Status& status() const { return status_; }
 
    private:
     friend class TableHeap;
@@ -35,6 +37,7 @@ class TableHeap {
     slot_id_t next_slot_ = 0;
     page_id_t cached_page_ = kInvalidPageId;
     std::optional<ReadPageGuard> guard_;
+    Status status_;
   };
 
   TableHeap(std::shared_ptr<Segment> segment, Schema schema,
@@ -47,6 +50,8 @@ class TableHeap {
   Result<RID> Insert(Transaction* txn, const Tuple& tuple);
   Status Delete(Transaction* txn, RID rid);
   Result<RID> Update(Transaction* txn, RID rid, const Tuple& tuple);
+  // Follows a forwarding pointer. A moved-in copy's RID is not a user-visible
+  // RID (scans never return it), so Get reports it as not found.
   Result<Tuple> Get(Transaction* txn, RID rid);
   Iterator Scan(Transaction* txn);
 
@@ -60,8 +65,14 @@ class TableHeap {
   }
 
  private:
+  Result<RID> InsertRecord(Transaction* txn, const std::vector<std::byte>& record,
+                           uint8_t slot_flags);
+  // Reads the record stored exactly at rid (no forwarding, no visibility).
+  Result<Tuple> ReadAt(RID rid);
   Status DeleteAt(Transaction* txn, RID rid);
-  Result<RID> ResolveForward(RID rid, int* hops);
+  // Follows at most one forwarding hop. *moved_in reports whether rid itself
+  // is the moved-in copy of another record (such RIDs are not user-visible).
+  Result<RID> ResolveForward(RID rid, int* hops, bool* moved_in = nullptr);
 
   std::shared_ptr<Segment> segment_;
   Schema schema_;

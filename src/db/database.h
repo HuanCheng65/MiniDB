@@ -66,7 +66,14 @@ class Database {
                        QueryResult* result);
   Status ExecuteDelete(Statement* statement, Transaction* txn,
                        QueryResult* result);
+  Status ExecuteUpdate(Statement* statement, Transaction* txn,
+                       QueryResult* result);
   Status ExecuteSelect(Statement* statement, Transaction* txn,
+                       QueryResult* result);
+  Status ExecuteCopy(Statement* statement, Transaction* txn,
+                     QueryResult* result);
+  // Engine introspection and settings (pragma.cpp, design doc 13.2).
+  Status ExecutePragma(Statement* statement, Transaction* txn,
                        QueryResult* result);
   Status ExecuteShowTables(QueryResult* result);
   Status ExecuteDescribe(Statement* statement, QueryResult* result);

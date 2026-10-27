@@ -256,6 +256,10 @@ class Parser {
   bool ParseInsert(Statement* statement);
   bool ParseSelect(Statement* statement);
   bool ParseDelete(Statement* statement);
+  bool ParseUpdate(Statement* statement);
+  bool ParseCopy(Statement* statement);
+  bool ParsePragma(Statement* statement);
+  bool ParsePragmaArgument(Literal* literal);
   bool ParseWhereClause(std::string* column, std::string* op, Literal* value,
                         bool* has_where);
   bool ParseShow(Statement* statement);
@@ -302,6 +306,9 @@ bool Parser::ParseStatement(Statement* statement) {
   if (IsKeyword(Peek(), "INSERT")) return ParseInsert(statement);
   if (IsKeyword(Peek(), "SELECT")) return ParseSelect(statement);
   if (IsKeyword(Peek(), "DELETE")) return ParseDelete(statement);
+  if (IsKeyword(Peek(), "UPDATE")) return ParseUpdate(statement);
+  if (IsKeyword(Peek(), "COPY")) return ParseCopy(statement);
+  if (IsKeyword(Peek(), "PRAGMA")) return ParsePragma(statement);
   if (IsKeyword(Peek(), "SHOW")) return ParseShow(statement);
   if (IsKeyword(Peek(), "DESCRIBE") || IsKeyword(Peek(), "DESC")) {
     return ParseDescribe(statement);
@@ -610,10 +617,21 @@ bool Parser::ParseLiteral(Literal* literal) {
 bool Parser::ParseSelect(Statement* statement) {
   if (!ExpectKeyword("SELECT")) return false;
   statement->type = StatementType::kSelect;
-  if (MatchSymbol("*")) {
+  // Items are column names or '*'; "SELECT rid, *" mixes both.
+  for (;;) {
+    std::string item;
+    if (MatchSymbol("*")) {
+      item = "*";
+    } else if (!ExpectIdentifier(&item)) {
+      return false;
+    }
+    statement->select.columns.push_back(std::move(item));
+    if (!MatchSymbol(",")) break;
+  }
+  if (statement->select.columns.size() == 1 &&
+      statement->select.columns[0] == "*") {
     statement->select.star = true;
-  } else {
-    if (!ParseIdentifierList(&statement->select.columns)) return false;
+    statement->select.columns.clear();
   }
   if (!ExpectKeyword("FROM")) return false;
   if (!ExpectIdentifier(&statement->table_name)) return false;
@@ -641,6 +659,74 @@ bool Parser::ParseDelete(Statement* statement) {
                           &statement->delete_spec.where_op,
                           &statement->delete_spec.where_value,
                           &statement->delete_spec.has_where);
+}
+
+bool Parser::ParseUpdate(Statement* statement) {
+  if (!ExpectKeyword("UPDATE")) return false;
+  statement->type = StatementType::kUpdate;
+  if (!ExpectIdentifier(&statement->table_name)) return false;
+  if (!ExpectKeyword("SET")) return false;
+  for (;;) {
+    Assignment assignment;
+    if (!ExpectIdentifier(&assignment.column)) return false;
+    if (!ExpectSymbol("=")) return false;
+    if (!ParseLiteral(&assignment.value)) return false;
+    statement->update.assignments.push_back(std::move(assignment));
+    if (!MatchSymbol(",")) break;
+  }
+  return ParseWhereClause(&statement->update.where_column,
+                          &statement->update.where_op,
+                          &statement->update.where_value,
+                          &statement->update.has_where);
+}
+
+bool Parser::ParseCopy(Statement* statement) {
+  if (!ExpectKeyword("COPY")) return false;
+  statement->type = StatementType::kCopy;
+  if (!ExpectIdentifier(&statement->table_name)) return false;
+  if (!ExpectKeyword("FROM")) return false;
+  if (Peek().type != TokenType::kString) return Fail("expected file path string");
+  statement->copy.path = Peek().text;
+  ++pos_;
+  if (MatchKeyword("DELIMITER")) {
+    if (Peek().type != TokenType::kString || Peek().text.size() != 1) {
+      return Fail("DELIMITER must be a one-character string");
+    }
+    statement->copy.delimiter = Peek().text[0];
+    ++pos_;
+  }
+  return true;
+}
+
+bool Parser::ParsePragma(Statement* statement) {
+  if (!ExpectKeyword("PRAGMA")) return false;
+  statement->type = StatementType::kPragma;
+  if (!ExpectIdentifier(&statement->pragma.name)) return false;
+  if (MatchSymbol("=")) {
+    statement->pragma.has_value = true;
+    return ParsePragmaArgument(&statement->pragma.value);
+  }
+  if (MatchSymbol("(")) {
+    if (MatchSymbol(")")) return true;
+    for (;;) {
+      Literal argument;
+      if (!ParsePragmaArgument(&argument)) return false;
+      statement->pragma.args.push_back(std::move(argument));
+      if (MatchSymbol(",")) continue;
+      return ExpectSymbol(")");
+    }
+  }
+  return true;
+}
+
+bool Parser::ParsePragmaArgument(Literal* literal) {
+  if (Peek().type == TokenType::kIdentifier) {
+    literal->kind = Literal::Kind::kString;
+    literal->text = Peek().text;
+    ++pos_;
+    return true;
+  }
+  return ParseLiteral(literal);
 }
 
 bool Parser::ParseWhereClause(std::string* column, std::string* op,

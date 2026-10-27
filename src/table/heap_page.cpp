@@ -60,7 +60,7 @@ void HeapPage::WriteSlot(std::byte* page, slot_id_t slot, const HeapSlot& s) {
 }
 
 Result<slot_id_t> HeapPage::Insert(std::byte* page, const std::byte* record,
-                                   uint16_t length) {
+                                   uint16_t length, uint8_t flags) {
   if (length == 0 || length > kMaxRecordLength) {
     return Status(StatusCode::kInvalidArgument,
                   "record length out of range for heap page");
@@ -111,7 +111,7 @@ Result<slot_id_t> HeapPage::Insert(std::byte* page, const std::byte* record,
   WriteU16(page, kFreeUpperOffset, offset);
   WriteU16(page, kFragBytesOffset, frag);
   WriteU16(page, kLiveCountOffset, static_cast<uint16_t>(live + 1));
-  WriteSlot(page, slot, HeapSlot{offset, length, kSlotUsed});
+  WriteSlot(page, slot, HeapSlot{offset, length, flags});
   return slot;
 }
 
@@ -142,6 +142,42 @@ Status HeapPage::UpdateInPlace(std::byte* page, slot_id_t slot,
   WriteU16(page, kFragBytesOffset,
            static_cast<uint16_t>(frag + (current.length - length)));
   WriteSlot(page, slot, HeapSlot{current.offset, length, current.flags});
+  return Status::Ok();
+}
+
+Status HeapPage::Replace(std::byte* page, slot_id_t slot,
+                         const std::byte* record, uint16_t length) {
+  if (length == 0 || length > kMaxRecordLength) {
+    return Status(StatusCode::kInvalidArgument,
+                  "record length out of range for heap page");
+  }
+  HeapSlot current;
+  const Status status = GetSlotChecked(page, slot, &current);
+  if (!status.ok()) return status;
+  if (current.forward()) {
+    return Status(StatusCode::kInvalidArgument, "cannot replace a forward slot");
+  }
+  if (length <= current.length) {
+    return UpdateInPlace(page, slot, record, length);
+  }
+  if (FreeSpace(page) + current.length < length) {
+    return Status(StatusCode::kNoSpace, "heap page has no space for update");
+  }
+
+  // Release the old bytes first so Compact() reclaims them.
+  const uint16_t frag = ReadU16(page, kFragBytesOffset);
+  WriteU16(page, kFragBytesOffset, static_cast<uint16_t>(frag + current.length));
+  WriteSlot(page, slot, HeapSlot{});
+  uint16_t lower = ReadU16(page, kFreeLowerOffset);
+  uint16_t upper = ReadU16(page, kFreeUpperOffset);
+  if (static_cast<uint32_t>(upper) - lower < length) {
+    Compact(page);
+    upper = ReadU16(page, kFreeUpperOffset);
+  }
+  const uint16_t offset = static_cast<uint16_t>(upper - length);
+  std::memcpy(page + offset, record, length);
+  WriteU16(page, kFreeUpperOffset, offset);
+  WriteSlot(page, slot, HeapSlot{offset, length, current.flags});
   return Status::Ok();
 }
 

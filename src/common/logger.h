@@ -48,13 +48,22 @@ class LogMessage {
   std::ostringstream stream_;
 };
 
-#define MINIDB_LOG_DEBUG(module) \
-  ::minidb::LogMessage(::minidb::LogLevel::kDebug, module).Stream()
-#define MINIDB_LOG_INFO(module) \
-  ::minidb::LogMessage(::minidb::LogLevel::kInfo, module).Stream()
-#define MINIDB_LOG_WARN(module) \
-  ::minidb::LogMessage(::minidb::LogLevel::kWarn, module).Stream()
-#define MINIDB_LOG_ERROR(module) \
-  ::minidb::LogMessage(::minidb::LogLevel::kError, module).Stream()
+// Turns the streamed expression into void so it fits in a conditional.
+struct LogVoidify {
+  void operator&(std::ostream&) {}
+};
+
+// A disabled level costs one comparison: the message is neither built nor
+// formatted (same trick as glog's LOG_IF). Safe inside if/else without braces.
+#define MINIDB_LOG(level, module)                         \
+  !::minidb::Logger::Instance().Enabled(level)            \
+      ? (void)0                                           \
+      : ::minidb::LogVoidify() &                          \
+            ::minidb::LogMessage(level, module).Stream()
+
+#define MINIDB_LOG_DEBUG(module) MINIDB_LOG(::minidb::LogLevel::kDebug, module)
+#define MINIDB_LOG_INFO(module) MINIDB_LOG(::minidb::LogLevel::kInfo, module)
+#define MINIDB_LOG_WARN(module) MINIDB_LOG(::minidb::LogLevel::kWarn, module)
+#define MINIDB_LOG_ERROR(module) MINIDB_LOG(::minidb::LogLevel::kError, module)
 
 }  // namespace minidb

@@ -26,6 +26,36 @@ bool AllZero(const std::byte* data, size_t length) {
   return true;
 }
 
+// CRC32C of a page with its checksum field taken as zero (design doc 5.2),
+// computed without copying the page.
+uint32_t PageChecksum(const std::byte* page) {
+  constexpr std::byte kZero[sizeof(uint32_t)] = {};
+  uint32_t crc = Crc32cExtend(0, page, kChecksumOffset);
+  crc = Crc32cExtend(crc, kZero, sizeof(kZero));
+  const size_t rest = kChecksumOffset + sizeof(uint32_t);
+  return Crc32cExtend(crc, page + rest, kPageSize - rest);
+}
+
+// Grows a file from old_size to new_size bytes. fallocate reserves real
+// blocks so the file is not sparse (less fragmentation, and ENOSPC surfaces
+// here rather than at some later page write); filesystems without fallocate
+// support fall back to ftruncate.
+Status GrowFile(int fd, uint64_t old_size, uint64_t new_size) {
+  if (::fallocate(fd, 0, static_cast<off_t>(old_size),
+                  static_cast<off_t>(new_size - old_size)) == 0) {
+    return Status::Ok();
+  }
+  if (errno != EOPNOTSUPP && errno != ENOSYS) {
+    return Status(StatusCode::kIoError,
+                  "fallocate failed: " + std::string(std::strerror(errno)));
+  }
+  if (::ftruncate(fd, static_cast<off_t>(new_size)) != 0) {
+    return Status(StatusCode::kIoError,
+                  "ftruncate failed: " + std::string(std::strerror(errno)));
+  }
+  return Status::Ok();
+}
+
 uint32_t NextFileId() {
   static std::atomic<uint32_t> next{1};
   return next.fetch_add(1);
@@ -113,9 +143,8 @@ DiskManager::~DiskManager() {
 Status DiskManager::InitializeNew(FileKind kind, uint32_t table_id) {
   const uint64_t size =
       static_cast<uint64_t>(kPagesPerExtent) * kPageSize;
-  if (::ftruncate(fd_, static_cast<off_t>(size)) != 0) {
-    return Status(StatusCode::kIoError, "ftruncate failed for file header");
-  }
+  Status status = GrowFile(fd_, 0, size);
+  if (!status.ok()) return status;
 
   header_ = FileHeader();
   header_.file_extents = 1;
@@ -128,7 +157,7 @@ Status DiskManager::InitializeNew(FileKind kind, uint32_t table_id) {
   std::array<std::byte, kPageSize> page0{};
   InitPageHeader(page0.data(), PageType::kFileHeader, 0, 0);
   header_.EncodeInto(page0.data());
-  Status status = WritePage(0, page0.data());
+  status = WritePage(0, page0.data());
   if (!status.ok()) return status;
 
   if (kind == FileKind::kData) {
@@ -160,9 +189,7 @@ Status DiskManager::LoadHeader(FileKind expected_kind) {
                   "empty file is not a MiniDB relation file: " + path_);
   }
   const uint32_t stored = ReadU32(page0.data(), kChecksumOffset);
-  std::array<std::byte, kPageSize> copy = page0;
-  WriteU32(copy.data(), kChecksumOffset, 0);
-  if (Crc32c(copy.data(), kPageSize) != stored) {
+  if (PageChecksum(page0.data()) != stored) {
     return Status(StatusCode::kCorruption, "file header checksum mismatch");
   }
   Result<FileHeader> header = FileHeader::DecodeFrom(page0.data());
@@ -173,11 +200,6 @@ Status DiskManager::LoadHeader(FileKind expected_kind) {
                   "unexpected relation file kind for " + path_);
   }
   return Status::Ok();
-}
-
-void DiskManager::Checksum(std::byte* data) {
-  WriteU32(data, kChecksumOffset, 0);
-  WriteU32(data, kChecksumOffset, Crc32c(data, kPageSize));
 }
 
 Status DiskManager::ReadPage(page_id_t page_id, std::byte* out) {
@@ -194,10 +216,7 @@ Status DiskManager::ReadPage(page_id_t page_id, std::byte* out) {
   if (AllZero(out, kPageSize)) return Status::Ok();
 
   const uint32_t stored = ReadU32(out, kChecksumOffset);
-  std::array<std::byte, kPageSize> copy;
-  std::memcpy(copy.data(), out, kPageSize);
-  WriteU32(copy.data(), kChecksumOffset, 0);
-  if (Crc32c(copy.data(), kPageSize) != stored) {
+  if (PageChecksum(out) != stored) {
     return Status(StatusCode::kCorruption,
                   "checksum mismatch for page " + std::to_string(page_id));
   }
@@ -208,14 +227,17 @@ Status DiskManager::ReadPage(page_id_t page_id, std::byte* out) {
   return Status::Ok();
 }
 
-Status DiskManager::WritePage(page_id_t page_id, std::byte* data) {
+Status DiskManager::WritePage(page_id_t page_id, const std::byte* data) {
   if (page_id >= PageCount()) {
     return Status(StatusCode::kInvalidArgument,
                   "write beyond file: page " + std::to_string(page_id));
   }
-  Checksum(data);
+  alignas(64) std::array<std::byte, kPageSize> out;
+  std::memcpy(out.data(), data, kPageSize);
+  WriteU32(out.data(), kChecksumOffset, 0);
+  WriteU32(out.data(), kChecksumOffset, Crc32c(out.data(), kPageSize));
   std::lock_guard<std::mutex> lock(mutex_);
-  const ssize_t n = ::pwrite(fd_, data, kPageSize, PageOffset(page_id));
+  const ssize_t n = ::pwrite(fd_, out.data(), kPageSize, PageOffset(page_id));
   if (n != static_cast<ssize_t>(kPageSize)) {
     return Status(StatusCode::kIoError,
                   "short write of page " + std::to_string(page_id) + ": " +
@@ -228,11 +250,11 @@ Status DiskManager::ExtendTo(uint32_t extents) {
   if (extents <= header_.file_extents) return Status::Ok();
   const uint64_t size =
       static_cast<uint64_t>(extents) * kPagesPerExtent * kPageSize;
+  const uint64_t old_size =
+      static_cast<uint64_t>(header_.file_extents) * kPagesPerExtent * kPageSize;
   std::lock_guard<std::mutex> lock(mutex_);
-  if (::ftruncate(fd_, static_cast<off_t>(size)) != 0) {
-    return Status(StatusCode::kIoError, "ftruncate failed: " +
-                                            std::string(std::strerror(errno)));
-  }
+  const Status status = GrowFile(fd_, old_size, size);
+  if (!status.ok()) return status;
   header_.file_extents = extents;
   return Status::Ok();
 }

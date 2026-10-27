@@ -1,4 +1,9 @@
 minidb_demo_db
 build
 build-release
-test
+# Local TPC-H data (*.tbl) stays out of git; the schema is tracked.
+test/*
+!test/tpc-h/
+test/tpc-h/*
+!test/tpc-h/schema.sql
+exam/

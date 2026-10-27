@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include "common/status.h"
+#include "common/types.h"
 
 namespace minidb {
 
@@ -22,5 +23,9 @@ Result<int32_t> ParseDate(std::string_view text);
 std::string FormatDate(int32_t days);
 
 std::string FormatDouble(double value);
+
+// RIDs are written "page:slot", e.g. "65:3".
+std::string FormatRid(RID rid);
+Result<RID> ParseRid(std::string_view text);
 
 }  // namespace minidb

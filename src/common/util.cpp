@@ -1,10 +1,10 @@
 #include "common/util.h"
 
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <limits>
-#include <sstream>
 
 namespace minidb {
 namespace {
@@ -199,13 +199,43 @@ std::string FormatDate(int32_t days) {
   return buffer;
 }
 
+std::string FormatRid(RID rid) {
+  return std::to_string(rid.page_id) + ":" + std::to_string(rid.slot);
+}
+
+Result<RID> ParseRid(std::string_view text) {
+  const size_t colon = text.find(':');
+  const auto parse = [](std::string_view part, uint64_t limit,
+                        uint64_t* out) -> bool {
+    if (part.empty() || part.size() > 10) return false;
+    uint64_t value = 0;
+    for (char c : part) {
+      if (c < '0' || c > '9') return false;
+      value = value * 10 + static_cast<uint64_t>(c - '0');
+    }
+    if (value > limit) return false;
+    *out = value;
+    return true;
+  };
+  uint64_t page = 0;
+  uint64_t slot = 0;
+  if (colon == std::string_view::npos ||
+      !parse(text.substr(0, colon), kInvalidPageId - 1ULL, &page) ||
+      !parse(text.substr(colon + 1), UINT16_MAX, &slot)) {
+    return Status(StatusCode::kInvalidArgument,
+                  "bad RID '" + std::string(text) + "', expected page:slot");
+  }
+  return RID{static_cast<page_id_t>(page), static_cast<slot_id_t>(slot)};
+}
+
 std::string FormatDouble(double value) {
   if (std::isnan(value)) return "NaN";
   if (std::isinf(value)) return value < 0 ? "-Infinity" : "Infinity";
-  std::ostringstream out;
-  out.precision(15);
-  out << value;
-  return out.str();
+  // Shortest text that reads back as the same double (what PostgreSQL 12+
+  // prints by default): 4192.4, not 4192.39999999999964.
+  char buffer[32];
+  const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
+  return std::string(buffer, result.ptr);
 }
 
 }  // namespace minidb

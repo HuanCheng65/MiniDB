@@ -309,6 +309,7 @@ Status Catalog::LoadSystemCatalog() {
     }
     columns[static_cast<size_t>(ordinal)] = std::move(column);
   }
+  if (!columns_iterator.status().ok()) return columns_iterator.status();
 
   bool saw_sys_tables = false;
   bool saw_sys_columns = false;
@@ -363,6 +364,7 @@ Status Catalog::LoadSystemCatalog() {
                                  is_system);
     if (!relation.ok()) return relation.status();
   }
+  if (!tables_iterator.status().ok()) return tables_iterator.status();
 
   if (!saw_sys_tables || !saw_sys_columns) {
     return Status(StatusCode::kCorruption,
@@ -501,6 +503,7 @@ Status Catalog::DropTable(Transaction* txn, std::string_view name) {
         table_rows.push_back(rid);
       }
     }
+    if (!iterator.status().ok()) return iterator.status();
   }
   std::vector<RID> column_rows;
   {
@@ -514,6 +517,7 @@ Status Catalog::DropTable(Transaction* txn, std::string_view name) {
         column_rows.push_back(rid);
       }
     }
+    if (!iterator.status().ok()) return iterator.status();
   }
 
   for (const RID& rid : table_rows) {

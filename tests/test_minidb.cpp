@@ -159,7 +159,7 @@ int main() {
       db, "SELECT l_quantity FROM lineitem WHERE l_orderkey = 0;");
   CHECK(decimal_column.empty());  // empty table, but the query must plan
 
-  // 2. DML with several types, WHERE filtering, DECIMAL and DATE round trips.
+  // 2. DML with several types, WHERE filtering, FLOAT and DATE round trips.
   CHECK(Exec(db,
              "INSERT INTO nation VALUES "
              "(0, 'ALGERIA', 0, 'north africa'),"
@@ -194,6 +194,20 @@ int main() {
   CHECK(not_null.size() == 1);
   if (!not_null.empty()) CHECK(not_null[0][0] == "north america");
 
+  // Trailing spaces in VARCHAR data are kept (dbgen comments end with one);
+  // comparisons ignore them (PAD SPACE), so CHAR columns match literals.
+  CHECK(Exec(db, "INSERT INTO region VALUES (9, 'TEST', 'ends with a space ');"));
+  auto spaced = Query(db, "SELECT r_comment FROM region WHERE r_name = 'TEST  ';");
+  CHECK(spaced.size() == 1 && spaced[0][0] == "ends with a space ");
+  CHECK(Exec(db, "DELETE FROM region WHERE r_regionkey = 9;"));
+
+  // DECIMAL is not in the handout schema but stays supported.
+  CHECK(Exec(db, "CREATE TABLE money (id INTEGER NOT NULL, amount DECIMAL(15,2));"));
+  CHECK(Exec(db, "INSERT INTO money VALUES (1, 123.45), (2, -0.05), (3, NULL);"));
+  auto money = Query(db, "SELECT amount FROM money WHERE amount < 100;");
+  CHECK(money.size() == 1 && money[0][0] == "-0.05");
+  CHECK(Exec(db, "DROP TABLE money;"));
+
   // 3. DELETE with and without a matching WHERE clause.
   CHECK(Exec(db, "DELETE FROM nation WHERE n_nationkey = 2;"));
   auto remaining_nations = Query(db, "SELECT n_name FROM nation;");
@@ -201,6 +215,24 @@ int main() {
   CHECK(!Contains(remaining_nations, "BRAZIL"));
   CHECK(Exec(db, "DELETE FROM nation WHERE n_nationkey = 99;"));
   CHECK(Query(db, "SELECT n_name FROM nation;").size() == 3);
+
+  // 3b. UPDATE: grow a row in place, several assignments, error cases.
+  const std::string long_comment(150, 'c');
+  CHECK(Exec(db, "UPDATE nation SET n_comment = '" + long_comment +
+                     "', n_regionkey = 4 WHERE n_nationkey = 1;"));
+  auto updated = Query(db, "SELECT n_comment, n_regionkey FROM nation "
+                           "WHERE n_nationkey = 1;");
+  CHECK(updated.size() == 1);
+  if (!updated.empty()) {
+    CHECK(updated[0][0] == long_comment);
+    CHECK(updated[0][1] == "4");
+  }
+  CHECK(Query(db, "SELECT n_name FROM nation;").size() == 3);
+  CHECK(Exec(db, "UPDATE nation SET n_name = NULL WHERE n_nationkey = 1;") ==
+        false);  // NOT NULL column
+  CHECK(Exec(db, "UPDATE nation SET missing = 1;") == false);
+  CHECK(Exec(db, "UPDATE sys_tables SET name = 'x';") == false);
+  CHECK(Exec(db, "UPDATE nation SET n_regionkey = 9 WHERE n_nationkey = 99;"));
 
   // 4. Multi-page table: 20,000 rows, about six 512 KB extents.
   CHECK(Exec(db,
@@ -219,6 +251,102 @@ int main() {
     CHECK(one[0][0] == std::string(120, 'x') + "_19999");
   }
 
+  // 4b. Growing rows on full pages forces forwarding pointers; every row must
+  // still be returned exactly once.
+  CHECK(Exec(db, "UPDATE bulk SET payload = '" + std::string(200, 'y') +
+                     "' WHERE id < 500;"));
+  CHECK(Query(db, "SELECT id FROM bulk;").size() ==
+        static_cast<size_t>(kTotalRows));
+  auto grown = Query(db, "SELECT payload FROM bulk WHERE id < 500;");
+  CHECK(grown.size() == 500);
+  if (!grown.empty()) CHECK(grown[0][0] == std::string(200, 'y'));
+
+  // 4c. COPY a dbgen-style .tbl file (trailing '|' on every line).
+  const std::string tbl_path = db_path + "_supplier.tbl";
+  {
+    std::ofstream tbl(tbl_path);
+    for (int i = 100; i < 1100; ++i) {
+      tbl << i << "|Supplier#" << i << "|addr " << i << "|" << i % 25
+          << "|10-100-100-1000|" << i << ".25|comment " << i << "|\n";
+    }
+  }
+  CHECK(Exec(db, "COPY supplier FROM '" + tbl_path + "';"));
+  CHECK(mydb_changes(db) == 1000);
+  auto copied = Query(db, "SELECT s_name, s_acctbal FROM supplier "
+                          "WHERE s_suppkey = 1099;");
+  CHECK(copied.size() == 1);
+  if (!copied.empty()) {
+    CHECK(copied[0][0] == "Supplier#1099");
+    CHECK(copied[0][1] == "1099.25");
+  }
+  {
+    std::ofstream bad(tbl_path);
+    bad << "5000|S|a|1|p|1.00|c|\n5001|S|a|not-a-number|p|1.00|c|\n";
+  }
+  char* copy_error = nullptr;
+  CHECK(mydb_exec(db, ("COPY supplier FROM '" + tbl_path + "';").c_str(),
+                  &copy_error) == MYDB_ERROR);
+  CHECK(copy_error != nullptr &&
+        std::string(copy_error).find(":2:") != std::string::npos);
+  mydb_free(copy_error);
+  CHECK(Exec(db, "COPY sys_tables FROM '" + tbl_path + "';") == false);
+  CHECK(Exec(db, "COPY supplier FROM '/nonexistent/file.tbl';") == false);
+  std::filesystem::remove(tbl_path);
+
+  // 4d. rid pseudo-column: RIDs from a scan look rows up directly, and stay
+  // valid for rows that were moved behind a forwarding pointer.
+  auto with_rid = Query(db, "SELECT rid, id FROM bulk WHERE id = 7;");
+  CHECK(with_rid.size() == 1);
+  if (!with_rid.empty()) {
+    auto by_rid = Query(db, "SELECT rid, * FROM bulk WHERE rid = '" +
+                                with_rid[0][0] + "';");
+    CHECK(by_rid.size() == 1);
+    if (!by_rid.empty()) {
+      CHECK(by_rid[0].size() == 3);
+      CHECK(by_rid[0][1] == "7");
+      CHECK(by_rid[0][2] == std::string(200, 'y'));  // grown in 4b
+    }
+  }
+  CHECK(Exec(db, "SELECT * FROM bulk WHERE rid = '1:0';"));  // bitmap page
+  CHECK(Query(db, "SELECT * FROM bulk WHERE rid = '1:0';").empty());
+  CHECK(Query(db, "SELECT * FROM bulk WHERE rid = '99999:0';").empty());
+  CHECK(Exec(db, "SELECT * FROM bulk WHERE rid = 'nonsense';") == false);
+
+  // 4e. PRAGMA introspection returns ordinary result sets.
+  auto pragmas = Query(db, "PRAGMA pragma_list;");
+  CHECK(pragmas.size() >= 10);
+  auto buffer_stats = Query(db, "PRAGMA buffer_stats;");
+  CHECK(buffer_stats.size() == 1 && buffer_stats[0][0] == "8");
+  CHECK(!Query(db, "PRAGMA buffer_frames;").empty());
+  auto info = Query(db, "PRAGMA table_info(bulk);");
+  CHECK(info.size() == 1);
+  if (!info.empty()) {
+    CHECK(info[0][10] == std::to_string(kTotalRows));  // rows
+    CHECK(info[0][11] != "0");                         // forwarded (4b)
+  }
+  auto extents = Query(db, "PRAGMA extents('bulk');");
+  CHECK(extents.size() >= 2);
+  if (!extents.empty()) CHECK(extents[0][4][0] == 'H');  // segment header
+  CHECK(!Query(db, "PRAGMA extent_bitmap(bulk);").empty());
+  auto free_space = Query(db, "PRAGMA free_space(bulk);");
+  CHECK(!free_space.empty());
+  CHECK(Query(db, "PRAGMA free_space_summary(bulk);").size() == 8);
+  if (!free_space.empty()) {
+    const std::string page = free_space[0][0];
+    auto header = Query(db, "PRAGMA page_header(bulk, " + page + ");");
+    CHECK(header.size() == 1 && header[0][1] == "HEAP");
+    CHECK(!Query(db, "PRAGMA page_slots(bulk, " + page + ");").empty());
+  }
+  CHECK(Exec(db, "PRAGMA page_slots(bulk, 64);") == false);  // segment header
+  CHECK(Exec(db, "PRAGMA flush;"));
+  CHECK(Exec(db, "PRAGMA log_level = info;"));
+  auto level = Query(db, "PRAGMA log_level;");
+  CHECK(level.size() == 1 && level[0][0] == "info");
+  CHECK(Exec(db, "PRAGMA log_level = error;"));
+  CHECK(Exec(db, "PRAGMA log_level = loud;") == false);
+  CHECK(Exec(db, "PRAGMA no_such_pragma;") == false);
+  CHECK(Exec(db, "PRAGMA table_info;") == false);
+
   // 5. Close and reopen: schema, tuples and extent/FSM state must survive.
   CHECK(mydb_close(db) == MYDB_OK);
   db = nullptr;
@@ -234,8 +362,12 @@ int main() {
   CHECK(std::filesystem::exists(db_path + "/bulk.fsm"));
   bulk = Query(db, "SELECT * FROM bulk;");
   CHECK(bulk.size() == static_cast<size_t>(kTotalRows));
-  supplier = Query(db, "SELECT s_acctbal FROM supplier;");
+  CHECK(Query(db, "SELECT id FROM bulk WHERE id < 500;").size() == 500);
+  supplier = Query(db, "SELECT s_acctbal FROM supplier WHERE s_suppkey = 7;");
   CHECK(supplier.size() == 1 && supplier[0][0] == "5755.94");
+  // 1 + 1000 copied + the first line of the failed COPY (rows loaded before
+  // an error are kept; there is no rollback in experiment 1).
+  CHECK(Query(db, "SELECT s_suppkey FROM supplier;").size() == 1002);
   auto nations_after_reopen = Query(db, "SELECT n_name FROM nation;");
   CHECK(nations_after_reopen.size() == 3);
   CHECK(!Contains(nations_after_reopen, "BRAZIL"));

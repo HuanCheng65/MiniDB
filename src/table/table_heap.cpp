@@ -3,12 +3,18 @@
 #include <cstring>
 
 #include "common/logger.h"
+#include "common/util.h"
 #include "table/heap_page.h"
 
 namespace minidb {
 
 Result<RID> TableHeap::Insert(Transaction* txn, const Tuple& tuple) {
-  const std::vector<std::byte>& record = tuple.data();
+  return InsertRecord(txn, tuple.data(), HeapPage::kSlotUsed);
+}
+
+Result<RID> TableHeap::InsertRecord(Transaction* txn,
+                                    const std::vector<std::byte>& record,
+                                    uint8_t slot_flags) {
   if (record.empty() || record.size() > HeapPage::kMaxRecordLength) {
     return Status(StatusCode::kInvalidArgument,
                   "tuple is too large for a heap page");
@@ -27,36 +33,31 @@ Result<RID> TableHeap::Insert(Transaction* txn, const Tuple& tuple) {
       if (!allocated.ok()) return allocated.status();
       page_id = allocated.value();
 
-      uint32_t free_space = 0;
-      {
-        auto guard_result = buffer_pool_.NewPage(segment_->data_disk(), page_id, PageType::kHeap,
-                                                 segment_id);
-        if (!guard_result.ok()) return guard_result.status();
-        WritePageGuard guard = guard_result.TakeValue();
-        HeapPage::Init(guard.MutableData(), page_id, segment_id);
-        auto slot = HeapPage::Insert(guard.MutableData(), record.data(), length);
-        if (!slot.ok()) {
-          // Should be impossible on a fresh page.
-          uint32_t free = HeapPage::FreeSpace(guard.Data());
-          (void)free;
-          return slot.status();
-        }
-        free_space = HeapPage::FreeSpace(guard.Data());
-        const RID rid{page_id, slot.value()};
-        guard = WritePageGuard();  // UNPIN before touching the FSM page
-        segment_->UpdateFreeSpace(page_id, free_space);
-        return rid;
-      }
+      auto guard_result = buffer_pool_.NewPage(segment_->data_disk(), page_id,
+                                               PageType::kHeap, segment_id);
+      if (!guard_result.ok()) return guard_result.status();
+      WritePageGuard guard = guard_result.TakeValue();
+      HeapPage::Init(guard.MutableData(), page_id, segment_id);
+      auto slot = HeapPage::Insert(guard.MutableData(), record.data(), length,
+                                   slot_flags);
+      if (!slot.ok()) return slot.status();  // impossible on a fresh page
+      const uint32_t free_space = HeapPage::FreeSpace(guard.Data());
+      const RID rid{page_id, slot.value()};
+      guard = WritePageGuard();  // UNPIN before touching the FSM page
+      segment_->UpdateFreeSpace(page_id, free_space);
+      MINIDB_LOG_DEBUG("HEAP") << "INSERT rid=(" << rid.page_id << ","
+                               << rid.slot << ") len=" << length << " new page";
+      return rid;
     }
 
     auto guard_result = buffer_pool_.FetchWrite(segment_->data_disk(), page_id);
     if (!guard_result.ok()) return guard_result.status();
     WritePageGuard guard = guard_result.TakeValue();
-    std::byte* page = guard.MutableData();
-    if (GetPageType(page) != PageType::kHeap) {
+    if (GetPageType(guard.Data()) != PageType::kHeap) {
       return Status(StatusCode::kCorruption, "segment page is not a heap page");
     }
-    auto slot = HeapPage::Insert(page, record.data(), length);
+    std::byte* page = guard.MutableData();
+    auto slot = HeapPage::Insert(page, record.data(), length, slot_flags);
     if (slot.ok()) {
       const RID rid{page_id, slot.value()};
       const uint32_t free_space = HeapPage::FreeSpace(page);
@@ -75,9 +76,16 @@ Result<RID> TableHeap::Insert(Transaction* txn, const Tuple& tuple) {
   return Status(StatusCode::kNoSpace, "could not find room for the tuple");
 }
 
-Result<RID> TableHeap::ResolveForward(RID rid, int* hops) {
+Result<RID> TableHeap::ResolveForward(RID rid, int* hops, bool* moved_in) {
   *hops = 0;
-  for (int i = 0; i < 8; ++i) {
+  if (moved_in != nullptr) *moved_in = false;
+  // A RID handed in by a caller must name a live data page of this table: a
+  // freed page still holds its old, checksum-valid bytes on disk.
+  if (!segment_->IsAllocatedDataPage(rid.page_id)) {
+    return Status(StatusCode::kNotFound,
+                  "RID " + FormatRid(rid) + " is not a data page of this table");
+  }
+  for (int i = 0; i < 2; ++i) {
     auto guard_result = buffer_pool_.FetchRead(segment_->data_disk(), rid.page_id);
     if (!guard_result.ok()) return guard_result.status();
     ReadPageGuard guard = guard_result.TakeValue();
@@ -87,27 +95,42 @@ Result<RID> TableHeap::ResolveForward(RID rid, int* hops) {
     }
     HeapSlot slot;
     const Status status = HeapPage::GetSlotChecked(page, rid.slot, &slot);
-    if (!status.ok()) return status;
+    if (!status.ok()) {
+      if (i > 0) {
+        return Status(StatusCode::kCorruption, "dangling forwarding pointer");
+      }
+      return status;
+    }
+    if (i == 0 && moved_in != nullptr) *moved_in = slot.moved_in();
     if (!slot.forward()) {
       *hops = i;
       return rid;
     }
+    if (i > 0) break;
     auto target = HeapPage::ReadForwardTarget(page, rid.slot);
     if (!target.ok()) return target.status();
     rid = target.value();
   }
-  return Status(StatusCode::kCorruption, "forwarding chain is too long");
+  return Status(StatusCode::kCorruption, "forwarding chain longer than one hop");
 }
 
 Result<Tuple> TableHeap::Get(Transaction* /*txn*/, RID rid) {
   int hops = 0;
-  auto resolved = ResolveForward(rid, &hops);
+  bool moved_in = false;
+  auto resolved = ResolveForward(rid, &hops, &moved_in);
   if (!resolved.ok()) return resolved.status();
+  if (moved_in) {
+    return Status(StatusCode::kNotFound,
+                  "RID is a moved-in copy; use the original RID");
+  }
+  return ReadAt(resolved.value());
+}
 
-  auto guard_result = buffer_pool_.FetchRead(segment_->data_disk(), resolved.value().page_id);
+Result<Tuple> TableHeap::ReadAt(RID rid) {
+  auto guard_result = buffer_pool_.FetchRead(segment_->data_disk(), rid.page_id);
   if (!guard_result.ok()) return guard_result.status();
   ReadPageGuard guard = guard_result.TakeValue();
-  auto record = HeapPage::ReadRecord(guard.Data(), resolved.value().slot);
+  auto record = HeapPage::ReadRecord(guard.Data(), rid.slot);
   if (!record.ok()) return record.status();
   return Tuple::FromRaw(record.TakeValue());
 }
@@ -125,8 +148,13 @@ Status TableHeap::DeleteAt(Transaction* txn, RID rid) {
     free_space = HeapPage::FreeSpace(page);
     empty = HeapPage::LiveCount(page) == 0;
   }
+  MINIDB_LOG_DEBUG("HEAP") << "DELETE rid=(" << rid.page_id << "," << rid.slot
+                           << ")" << (empty ? " page now empty" : "");
   segment_->UpdateFreeSpace(rid.page_id, free_space);
-  if (empty) {
+  // Forward slots count as live, so an empty page has no forwarding pointers.
+  // The segment's first heap page is kept to avoid free/alloc churn when a
+  // table oscillates around zero rows (design doc 7.4).
+  if (empty && !segment_->IsFirstDataPage(rid.page_id)) {
     const Status status = segment_->FreePage(txn, rid.page_id);
     if (!status.ok()) return status;
   }
@@ -135,8 +163,13 @@ Status TableHeap::DeleteAt(Transaction* txn, RID rid) {
 
 Status TableHeap::Delete(Transaction* txn, RID rid) {
   int hops = 0;
-  auto resolved = ResolveForward(rid, &hops);
+  bool moved_in = false;
+  auto resolved = ResolveForward(rid, &hops, &moved_in);
   if (!resolved.ok()) return resolved.status();
+  if (moved_in) {
+    return Status(StatusCode::kInvalidArgument,
+                  "RID is a moved-in copy; use the original RID");
+  }
   if (hops > 0) {
     const Status status = DeleteAt(txn, resolved.value());
     if (!status.ok()) return status;
@@ -145,58 +178,57 @@ Status TableHeap::Delete(Transaction* txn, RID rid) {
 }
 
 Result<RID> TableHeap::Update(Transaction* txn, RID rid, const Tuple& tuple) {
-  if (tuple.data().empty() || tuple.data().size() > HeapPage::kMaxRecordLength) {
+  const std::vector<std::byte>& record = tuple.data();
+  if (record.empty() || record.size() > HeapPage::kMaxRecordLength) {
     return Status(StatusCode::kInvalidArgument, "tuple is too large");
   }
+  const uint16_t length = static_cast<uint16_t>(record.size());
   int hops = 0;
-  auto resolved = ResolveForward(rid, &hops);
+  bool moved_in = false;
+  auto resolved = ResolveForward(rid, &hops, &moved_in);
   if (!resolved.ok()) return resolved.status();
+  if (moved_in) {
+    return Status(StatusCode::kInvalidArgument,
+                  "RID is a moved-in copy; use the original RID");
+  }
   const RID target = resolved.value();
 
-  // Try an in-place update first.
-  bool in_place = false;
+  // Steps 1 and 2 of design doc 9.2: overwrite, or grow within the page.
+  bool done = false;
   uint32_t free_space = 0;
   {
     auto guard_result = buffer_pool_.FetchWrite(segment_->data_disk(), target.page_id);
     if (!guard_result.ok()) return guard_result.status();
     WritePageGuard guard = guard_result.TakeValue();
     std::byte* page = guard.MutableData();
-    HeapSlot slot;
-    const Status status = HeapPage::GetSlotChecked(page, target.slot, &slot);
-    if (!status.ok()) return status;
-    if (tuple.data().size() <= slot.length) {
-      const Status update = HeapPage::UpdateInPlace(
-          page, target.slot, tuple.data().data(),
-          static_cast<uint16_t>(tuple.data().size()));
-      if (!update.ok()) return update;
+    const Status status = HeapPage::Replace(page, target.slot, record.data(), length);
+    if (status.ok()) {
       free_space = HeapPage::FreeSpace(page);
-      in_place = true;
+      done = true;
+    } else if (status.code() != StatusCode::kNoSpace) {
+      return status;
     }
   }
-  if (in_place) {
+  if (done) {
     segment_->UpdateFreeSpace(target.page_id, free_space);
+    MINIDB_LOG_DEBUG("HEAP") << "UPDATE rid=(" << rid.page_id << "," << rid.slot
+                             << ") in page " << target.page_id;
     return rid;
   }
 
-  // Grow: insert a new version and leave a forwarding pointer behind.
-  auto inserted = Insert(txn, tuple);
+  // Step 3: move the new version elsewhere and keep a one-hop forward at rid.
+  auto inserted = InsertRecord(
+      txn, record,
+      static_cast<uint8_t>(HeapPage::kSlotUsed | HeapPage::kSlotMovedIn));
   if (!inserted.ok()) return inserted.status();
   const RID new_rid = inserted.value();
 
-  if (target == rid) {
-    auto guard_result = buffer_pool_.FetchWrite(segment_->data_disk(), rid.page_id);
-    if (!guard_result.ok()) return guard_result.status();
-    WritePageGuard guard = guard_result.TakeValue();
-    std::byte* page = guard.MutableData();
-    const Status status = HeapPage::SetForward(page, rid.slot, new_rid);
-    if (!status.ok()) return status;
-    free_space = HeapPage::FreeSpace(page);
-    guard = WritePageGuard();
-    segment_->UpdateFreeSpace(rid.page_id, free_space);
-  } else {
-    // rid -> target -> new_rid, collapsing to rid -> new_rid.
+  if (!(target == rid)) {
+    // rid -> target -> new_rid collapses to rid -> new_rid.
     const Status deleted = DeleteAt(txn, target);
     if (!deleted.ok()) return deleted;
+  }
+  {
     auto guard_result = buffer_pool_.FetchWrite(segment_->data_disk(), rid.page_id);
     if (!guard_result.ok()) return guard_result.status();
     WritePageGuard guard = guard_result.TakeValue();
@@ -204,9 +236,8 @@ Result<RID> TableHeap::Update(Transaction* txn, RID rid, const Tuple& tuple) {
     const Status status = HeapPage::SetForward(page, rid.slot, new_rid);
     if (!status.ok()) return status;
     free_space = HeapPage::FreeSpace(page);
-    guard = WritePageGuard();
-    segment_->UpdateFreeSpace(rid.page_id, free_space);
   }
+  segment_->UpdateFreeSpace(rid.page_id, free_space);
   MINIDB_LOG_DEBUG("HEAP") << "UPDATE rid=(" << rid.page_id << "," << rid.slot
                            << ") -> FORWARD (" << new_rid.page_id << ","
                            << new_rid.slot << ")";
@@ -228,6 +259,7 @@ void TableHeap::Iterator::Reset() {
 }
 
 bool TableHeap::Iterator::Next(RID* rid, Tuple* tuple) {
+  if (!status_.ok()) return false;
   while (page_index_ < pages_.size()) {
     const page_id_t page_id = pages_[page_index_];
     if (!guard_.has_value() || cached_page_ != page_id) {
@@ -235,9 +267,8 @@ bool TableHeap::Iterator::Next(RID* rid, Tuple* tuple) {
       auto guard_result =
           heap_->buffer_pool_.FetchRead(heap_->disk(), page_id);
       if (!guard_result.ok()) {
-        ++page_index_;
-        next_slot_ = 0;
-        continue;
+        status_ = guard_result.status();
+        return false;
       }
       guard_ = guard_result.TakeValue();
       cached_page_ = page_id;
@@ -259,18 +290,27 @@ bool TableHeap::Iterator::Next(RID* rid, Tuple* tuple) {
 
       if (current.forward()) {
         auto target = HeapPage::ReadForwardTarget(page, slot);
-        if (!target.ok()) continue;
+        if (!target.ok()) {
+          status_ = target.status();
+          return false;
+        }
         const RID original{page_id, slot};
         Reset();  // release this page before fetching the forwarded record
-        auto record = heap_->Get(nullptr, target.value());
-        if (!record.ok()) continue;
+        auto record = heap_->ReadAt(target.value());
+        if (!record.ok()) {
+          status_ = record.status();
+          return false;
+        }
         *rid = original;
         *tuple = record.TakeValue();
         return true;
       }
 
       auto record = HeapPage::ReadRecord(page, slot);
-      if (!record.ok()) continue;
+      if (!record.ok()) {
+        status_ = record.status();
+        return false;
+      }
       *rid = RID{page_id, slot};
       *tuple = Tuple::FromRaw(record.TakeValue());
       return true;

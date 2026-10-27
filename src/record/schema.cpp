@@ -48,6 +48,10 @@ Status Schema::BuildLayout() {
   var_offsets_.assign(n, 0);
   fixed_size_ = 0;
   var_count_ = 0;
+  // Accumulate in 32 bits: many wide CHAR columns would wrap a uint16_t and
+  // slip past the record-size check below.
+  uint32_t fixed_total = 0;
+  uint32_t max_total = kRecordHeaderSize + static_cast<uint32_t>((n + 7) / 8);
 
   for (size_t i = 0; i < n; ++i) {
     const Column& column = columns_[i];
@@ -86,15 +90,22 @@ Status Schema::BuildLayout() {
     }
 
     if (IsFixedType(column.type)) {
-      fixed_offsets_[i] = fixed_size_;
-      fixed_size_ = static_cast<uint16_t>(
-          fixed_size_ + FixedTypeSize(column.type, column.length));
+      const uint32_t size = FixedTypeSize(column.type, column.length);
+      fixed_offsets_[i] = static_cast<uint16_t>(fixed_total);
+      fixed_total += size;
+      max_total += size;
     } else {
       var_indices_[i] = static_cast<uint16_t>(var_count_);
       var_offsets_[i] = static_cast<uint16_t>(2 * var_count_);
       ++var_count_;
+      max_total += 2u + column.length;
+    }
+    if (max_total > kMaxRecordSize) {
+      return Status(StatusCode::kInvalidArgument,
+                    "record can exceed the 8100-byte page limit");
     }
   }
+  fixed_size_ = static_cast<uint16_t>(fixed_total);
 
   null_bitmap_size_ = static_cast<uint16_t>((n + 7) / 8);
   if (MaxRecordSize() > kMaxRecordSize) {

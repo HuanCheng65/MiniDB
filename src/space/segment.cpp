@@ -69,7 +69,7 @@ Result<std::unique_ptr<Segment>> Segment::Create(    SpaceManager& space, Buffer
 
   MINIDB_LOG_INFO("SPACE") << "segment " << segment_id << " created at page "
                            << segment->header_page_ << " extent " << first_extent
-                           << " file=" << space.disk_ptr()->file_id();
+                           << " file=" << space.disk_ptr()->name();
   return segment;
 }
 
@@ -100,6 +100,7 @@ Result<std::unique_ptr<Segment>> Segment::Open(SpaceManager& space,
     segment->page_count_ = ReadU32(page, kPageCountOffset);
     overflow_page = ReadU32(page, kOverflowPageOffset);
     segment->insert_hint_spno_ = ReadU32(page, kInsertHintOffset);
+    segment->persisted_insert_hint_ = segment->insert_hint_spno_;
     const size_t inline_count =
         std::min<size_t>(extent_slots, kInlineExtentCapacity);
     for (size_t i = 0; i < inline_count; ++i) {
@@ -163,11 +164,15 @@ Result<std::unique_ptr<Segment>> Segment::Open(SpaceManager& space,
 }
 
 Result<page_id_t> Segment::AllocatePageInternal(Transaction* txn) {
+  // Look for a free page starting where the last allocation succeeded, so a
+  // bulk load does not rescan every full extent (design doc 7.3 step 1).
   uint32_t slot = 0;
   bool found = false;
-  for (size_t i = 0; i < extents_.size(); ++i) {
-    if (extents_[i].valid() && extents_[i].used_mask != kFullMask) {
-      slot = static_cast<uint32_t>(i);
+  const size_t slot_total = extents_.size();
+  for (size_t i = 0; i < slot_total; ++i) {
+    const size_t index = (alloc_hint_slot_ + i) % slot_total;
+    if (extents_[index].valid() && extents_[index].used_mask != kFullMask) {
+      slot = static_cast<uint32_t>(index);
       found = true;
       break;
     }
@@ -179,19 +184,26 @@ Result<page_id_t> Segment::AllocatePageInternal(Transaction* txn) {
     ExtentEntry entry;
     entry.extent_id = extent.value();
     entry.used_mask = 0;
-    extents_.push_back(entry);
-    slot = static_cast<uint32_t>(extents_.size() - 1);
+    // Fill the first hole left by a freed extent before growing the list, so
+    // spno values stay dense (design doc 5.5 / 7.3 step 3). The FSM entries of
+    // a hole were zeroed when its pages were freed.
+    auto hole = std::find_if(extents_.begin(), extents_.end(),
+                             [](const ExtentEntry& e) { return !e.valid(); });
+    if (hole != extents_.end()) {
+      *hole = entry;
+      slot = static_cast<uint32_t>(hole - extents_.begin());
+    } else {
+      extents_.push_back(entry);
+      slot = static_cast<uint32_t>(extents_.size() - 1);
+    }
     extent_slot_[entry.extent_id] = slot;
   }
 
-  uint64_t mask = extents_[slot].used_mask;
-  uint32_t bit = 0;
-  while (bit < 64 && (mask & (1ULL << bit)) != 0) ++bit;
-  if (bit >= 64) {
-    return Status(StatusCode::kInternal, "extent bitmap full");
-  }
+  const uint64_t mask = extents_[slot].used_mask;
+  const uint32_t bit = static_cast<uint32_t>(__builtin_ctzll(~mask));
   extents_[slot].used_mask |= (1ULL << bit);
   ++page_count_;
+  alloc_hint_slot_ = slot;
 
   const page_id_t page_id =
       extents_[slot].extent_id * kPagesPerExtent + bit;
@@ -210,7 +222,7 @@ Result<page_id_t> Segment::AllocatePage(Transaction* txn) {
   if (!allocation.ok()) return allocation.status();
   const Status status = Persist(txn);
   if (!status.ok()) return status;
-  MINIDB_LOG_DEBUG("SPACE") << "ALLOC file=" << space_.disk_ptr()->file_id()
+  MINIDB_LOG_DEBUG("SPACE") << "ALLOC file=" << space_.disk_ptr()->name()
                             << " page=" << allocation.value()
                             << " seg=" << segment_id_;
   return allocation.value();
@@ -228,6 +240,10 @@ Status Segment::FreePage(Transaction* txn, page_id_t page_id) {
   if ((entry.used_mask & (1ULL << bit)) == 0) {
     return Status(StatusCode::kNotFound, "page is already free");
   }
+  if (special_pages_.count(page_id) != 0) {
+    return Status(StatusCode::kInvalidArgument,
+                  "segment header/extent-list pages cannot be freed");
+  }
   const uint32_t spno = SpnoOf(page_id, slot.value());
   const Status fsm_status = fsm_.Update(spno, 0);
   if (!fsm_status.ok()) return fsm_status;
@@ -235,6 +251,8 @@ Status Segment::FreePage(Transaction* txn, page_id_t page_id) {
   entry.used_mask &= ~(1ULL << bit);
   --page_count_;
   buffer_pool_.DiscardPage(space_.disk_ptr(), page_id);
+  MINIDB_LOG_DEBUG("SPACE") << "FREE file=" << space_.disk_ptr()->name()
+                            << " page=" << page_id << " seg=" << segment_id_;
   special_pages_.erase(page_id);
 
   if (entry.used_mask == 0 && slot.value() != 0) {
@@ -258,16 +276,30 @@ Result<page_id_t> Segment::FindPageWithSpace(uint32_t need_bytes) {
   const uint32_t start_offset = start % FreeSpaceMap::kEntriesPerPage;
   const size_t page_total = fsm_.page_count();
 
-  for (size_t k = 0; k < page_total; ++k) {
+  // Scan from the hint to the end, then wrap once and finish with the part of
+  // the start page that precedes the hint (design doc 7.4 step 2).
+  for (size_t k = 0; k <= page_total; ++k) {
     const size_t page_index = (start_page + k) % page_total;
+    uint32_t lo = 0;
+    uint32_t hi = FreeSpaceMap::kEntriesPerPage;
+    if (k == 0) {
+      lo = start_offset;
+    } else if (k == page_total) {
+      hi = start_offset;
+      if (hi == 0) break;
+    }
+    if (fsm_.MaxCategoryHint(static_cast<uint32_t>(page_index)) < need_cat) {
+      continue;
+    }
     auto guard_result = fsm_.ReadPage(static_cast<uint32_t>(page_index));
     if (!guard_result.ok()) return guard_result.status();
     ReadPageGuard guard = guard_result.TakeValue();
     const std::byte* data = guard.Data();
-    const uint32_t lo = (k == 0) ? start_offset : 0;
-    for (uint32_t offset = lo; offset < FreeSpaceMap::kEntriesPerPage;
-         ++offset) {
-      if (ReadU8(data, kPageHeaderSize + offset) < need_cat) continue;
+    uint8_t seen_max = 0;
+    for (uint32_t offset = lo; offset < hi; ++offset) {
+      const uint8_t category = ReadU8(data, kPageHeaderSize + offset);
+      if (category > seen_max) seen_max = category;
+      if (category < need_cat) continue;
       const uint32_t spno = static_cast<uint32_t>(
           page_index * FreeSpaceMap::kEntriesPerPage + offset);
       const uint32_t slot = spno / kPagesPerExtent;
@@ -277,6 +309,11 @@ Result<page_id_t> Segment::FindPageWithSpace(uint32_t need_bytes) {
       if (!entry.valid() || (entry.used_mask & (1ULL << bit)) == 0) continue;
       insert_hint_spno_ = spno;
       return entry.extent_id * kPagesPerExtent + bit;
+    }
+    if (lo == 0 && hi == FreeSpaceMap::kEntriesPerPage) {
+      // A full scan found nothing usable: remember the page's real maximum so
+      // later searches can skip it without reading it.
+      fsm_.SetMaxCategoryHint(static_cast<uint32_t>(page_index), seen_max);
     }
   }
   return kInvalidPageId;
@@ -298,7 +335,32 @@ void Segment::UpdateFreeSpace(page_id_t page_id, uint32_t free_bytes) {
   insert_hint_spno_ = spno;
 }
 
-Status Segment::Flush(Transaction* txn) { return Persist(txn); }
+Status Segment::Flush(Transaction* txn) {
+  // Allocation and free already persist the extent list; only the insert hint
+  // is kept in memory between them, so skip the rewrite when it is current.
+  if (insert_hint_spno_ == persisted_insert_hint_) return Status::Ok();
+  return Persist(txn);
+}
+
+bool Segment::IsAllocatedDataPage(page_id_t page_id) const {
+  auto slot = SlotOfExtent(page_id / kPagesPerExtent);
+  if (!slot.ok()) return false;
+  const uint64_t bit = 1ULL << (page_id % kPagesPerExtent);
+  return (extents_[slot.value()].used_mask & bit) != 0 &&
+         special_pages_.count(page_id) == 0;
+}
+
+Result<uint32_t> Segment::SpnoOfPage(page_id_t page_id) const {
+  auto slot = SlotOfExtent(page_id / kPagesPerExtent);
+  if (!slot.ok()) return slot.status();
+  return SpnoOf(page_id, slot.value());
+}
+
+Result<uint8_t> Segment::FreeSpaceCategory(page_id_t page_id) {
+  auto spno = SpnoOfPage(page_id);
+  if (!spno.ok()) return spno.status();
+  return fsm_.Get(spno.value());
+}
 
 void Segment::WriteMeta(std::byte* page) const {
   std::memset(page + kPageHeaderSize, 0, kPageSize - kPageHeaderSize);
@@ -340,6 +402,7 @@ Status Segment::Persist(Transaction* txn) {
     WritePageGuard guard = guard_result.TakeValue();
     WriteMeta(guard.MutableData());
   }
+  persisted_insert_hint_ = insert_hint_spno_;
 
   for (size_t i = 0; i < overflow_pages_.size(); ++i) {
     auto guard_result =

@@ -1,6 +1,7 @@
 #include "buffer/buffer_pool.h"
 
 #include <cstring>
+#include <filesystem>
 
 #include "common/logger.h"
 
@@ -167,6 +168,10 @@ Result<frame_id_t> BufferPool::TakeFreeFrameLocked() {
   }
   const frame_id_t frame = *victim;
   Frame& victim_frame = *frames_[frame];
+  MINIDB_LOG_DEBUG("BUF") << "EVICT frame=" << frame << " file="
+                          << (victim_frame.disk ? victim_frame.disk->name() : "-")
+                          << " pid=" << victim_frame.page_id
+                          << " dirty=" << (victim_frame.dirty ? 1 : 0);
   if (victim_frame.dirty) {
     const Status status = WriteBackLocked(frame);
     if (!status.ok()) {
@@ -218,15 +223,19 @@ Result<frame_id_t> BufferPool::AcquireFrameLocked(
     replacer_->SetEvictable(frame_id, false);
     replacer_->RecordAccess(frame_id);
     ++stats_.miss;
+    MINIDB_LOG_DEBUG("BUF") << "MISS file=" << disk->name() << " pid=" << page_id
+                            << " -> frame=" << frame_id;
 
     if (read_from_disk) {
       const Status status = disk->ReadPage(page_id, frame->data);
       if (!status.ok()) {
+        // Give the frame back as a free frame; it holds no valid page.
         page_table_.erase(key);
         frame->disk.reset();
         frame->page_id = kInvalidPageId;
         frame->pin_count = 0;
-        replacer_->SetEvictable(frame_id, true);
+        replacer_->Remove(frame_id);
+        free_list_.push_back(frame_id);
         return status;
       }
     } else {
@@ -311,8 +320,10 @@ Result<WritePageGuard> BufferPool::NewPage(
       RegisterFileLocked(disk);
       replacer_->SetEvictable(frame_id, false);
       replacer_->RecordAccess(frame_id);
-      ++stats_.miss;
-      ++stats_.new_page;
+      ++stats_.new_page;  // not a miss: nothing is read from disk
+      MINIDB_LOG_DEBUG("BUF") << "NEW file=" << disk->name() << " pid=" << page_id
+                              << " type=" << static_cast<int>(type)
+                              << " -> frame=" << frame_id;
     }
   }
   return WritePageGuard(this, frame_id,
@@ -331,7 +342,7 @@ Status BufferPool::WriteBackLocked(frame_id_t frame_id) {
   if (!status.ok()) return status;
   frame.dirty = false;
   ++stats_.flush;
-  MINIDB_LOG_DEBUG("BUF") << "FLUSH file=" << frame.disk->file_id()
+  MINIDB_LOG_DEBUG("BUF") << "FLUSH file=" << frame.disk->name()
                           << " pid=" << frame.page_id;
   return Status::Ok();
 }
@@ -405,6 +416,28 @@ Status BufferPool::DiscardFile(uint32_t file_id) {
   }
   files_.erase(file_id);
   return Status::Ok();
+}
+
+std::vector<FrameInfo> BufferPool::Frames() {
+  std::vector<FrameInfo> frames;
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (frame_id_t id = 0; id < frames_.size(); ++id) {
+    Frame& frame = *frames_[id];
+    if (frame.disk == nullptr || frame.page_id == kInvalidPageId) continue;
+    FrameInfo info;
+    info.frame = id;
+    info.file = frame.disk->name();
+    info.page_id = frame.page_id;
+    info.pin_count = frame.pin_count;
+    info.dirty = frame.dirty;
+    // Never wait for a page latch while holding mutex_ (design doc 11.5).
+    if (frame.latch.try_lock_shared()) {
+      info.page_type = GetPageType(frame.data);
+      frame.latch.unlock_shared();
+    }
+    frames.push_back(std::move(info));
+  }
+  return frames;
 }
 
 void BufferPool::Unpin(frame_id_t frame_id) {

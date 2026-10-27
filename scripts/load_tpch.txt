@@ -1,0 +1,28 @@
+-- Load all eight TPC-H tables (experiment 01 data, SF1: ~8.66M rows, ~1 GB).
+-- Put the eight .tbl files from benchmark_data.zip into test/tpc-h/, then:
+--
+--   rm -rf /tmp/tpch_db
+--   ./build-release/minidb_shell --db /tmp/tpch_db --log-level info --file scripts/load_tpch.txt
+--
+.echo on
+.timer on
+.echo off
+.read test/tpc-h/schema.sql
+.echo on
+.load region   test/tpc-h/region.tbl
+.load nation   test/tpc-h/nation.tbl
+.load supplier test/tpc-h/supplier.tbl
+.load customer test/tpc-h/customer.tbl
+.load part     test/tpc-h/part.tbl
+.load partsupp test/tpc-h/partsupp.tbl
+.load orders   test/tpc-h/orders.tbl
+.load lineitem test/tpc-h/lineitem.tbl
+.info region
+.info nation
+.info supplier
+.info customer
+.info part
+.info partsupp
+.info orders
+.info lineitem
+.stats

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "buffer/buffer_pool.h"
 #include "common/status.h"
@@ -14,6 +15,11 @@
 #include "txn/transaction.h"
 
 namespace minidb {
+
+struct ExtentBitmapInfo {
+  uint32_t alloc_hint = 0;
+  std::vector<bool> allocated;  // one entry per extent in the file
+};
 
 class SpaceManager {
  public:
@@ -27,6 +33,8 @@ class SpaceManager {
 
   Result<extent_id_t> AllocateExtent(Transaction* txn);
   Status FreeExtent(Transaction* txn, extent_id_t extent);
+  // Copy of the extent bitmap for the extents the file currently contains.
+  Result<ExtentBitmapInfo> ReadBitmap();
 
   Result<std::unique_ptr<Segment>> CreateSegment(Transaction* txn,
                                                  segment_id_t segment_id,

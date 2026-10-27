@@ -1,0 +1,81 @@
+-- MiniDB experiment 1 acceptance demo (design doc 15.4).
+--
+-- Needs supplier.tbl from TPC-H dbgen (10,000 rows at SF1) in test/tpc-h/.
+-- Run from the repository root against a fresh database folder, with a small
+-- buffer pool so that eviction is visible:
+--
+--   rm -rf /tmp/demo_db
+--   ./build/minidb_shell --db /tmp/demo_db --buffer 64 --file scripts/demo_supplier.txt
+--
+.echo on
+.timer on
+
+-- ===== 1. Schema: every relation gets <name>.dat + <name>.fsm =====
+.echo off
+.read test/tpc-h/schema.sql
+.echo on
+.tables
+.schema supplier
+
+-- ===== 2. Bulk load: extents and pages are allocated, the pool evicts =====
+.load supplier test/tpc-h/supplier.tbl
+.stats
+.info supplier
+
+-- ===== 3. Space management: file -> extents -> pages -> bytes =====
+-- Extent bitmap of supplier.dat (extent 0 holds the file header and bitmap).
+.bitmap supplier
+-- Segment extent list; one character per page (H = segment header).
+.extents supplier
+-- What the free-space map records, as a histogram.
+.fsm supplier
+
+-- ===== 4. Records and RIDs =====
+SELECT rid, s_suppkey, s_name, s_acctbal FROM supplier LIMIT 5;
+.get supplier 65:0
+-- Slotted page: header and slot directory of the first heap page.
+.page supplier 65
+
+-- ===== 5. Update: a row that no longer fits moves; its RID does not =====
+UPDATE supplier SET s_address = 'A longer address: 40 characters long....', s_comment = 'This comment is now much longer than before, so the row no longer fits in its page.' WHERE s_suppkey = 1;
+-- Slot 0 is now a FORWARD pointer; the old RID still returns the new row.
+.page supplier 65
+.info supplier
+-- Buffer manager at work: after a flush every frame is clean, so a miss
+-- evicts an unpinned frame without writing it back. Reading 65:0 needs the
+-- page with the forward pointer and the page the row moved to; only pages
+-- that are not cached show up as MISS.
+.flush
+.log debug
+.get supplier 65:0
+.log warn
+
+-- ===== 6. Delete: slots and whole pages are freed, the FSM records it =====
+DELETE FROM supplier WHERE s_suppkey <= 3000;
+.info supplier
+-- '.' = page returned to the segment (the first heap page is always kept).
+.extents supplier
+.fsm supplier
+
+-- The FSM steers a new row into freed space: the page count does not grow.
+.log debug
+INSERT INTO supplier VALUES (20001, 'Supplier#000020001', 'New address', 7, '17-123-456-7890', 1234.56, 'inserted after the delete');
+.log warn
+SELECT rid, s_suppkey, s_name FROM supplier WHERE s_suppkey = 20001;
+.info supplier
+
+-- ===== 6b. Empty the table: whole extents go back to the file bitmap =====
+DELETE FROM supplier;
+-- Freed extents leave holes in the extent list; spno values stay stable.
+.extents supplier
+.bitmap supplier
+-- Reloading reuses the freed extents and fills the holes.
+.load supplier test/tpc-h/supplier.tbl
+.extents supplier
+.bitmap supplier
+
+-- ===== 7. Buffer pool state and flush =====
+.stats
+.frames
+.flush
+.stats

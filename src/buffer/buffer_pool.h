@@ -42,6 +42,16 @@ struct BufferStats {
   }
 };
 
+// One occupied frame, as reported by PRAGMA buffer_frames.
+struct FrameInfo {
+  frame_id_t frame = 0;
+  std::string file;  // file name of the relation data/FSM file
+  page_id_t page_id = kInvalidPageId;
+  PageType page_type = PageType::kInvalid;  // kInvalid when write-latched
+  int pin_count = 0;
+  bool dirty = false;
+};
+
 class Replacer {
  public:
   virtual ~Replacer() = default;
@@ -168,6 +178,9 @@ class BufferPool {
   Status DiscardFile(uint32_t file_id);
 
   const BufferStats& Stats() const { return stats_; }
+  // Occupied frames in frame order. Frames whose page is write-latched report
+  // PageType::kInvalid instead of waiting for the latch.
+  std::vector<FrameInfo> Frames();
   size_t FrameCount() const { return frames_.size(); }
 
  private:

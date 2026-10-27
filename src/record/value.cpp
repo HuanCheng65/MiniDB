@@ -50,7 +50,9 @@ std::string ValueToString(const Value& value) {
     case ValueKind::kDate:
       return FormatDate(value.int32_value);
     case ValueKind::kString:
-      return TrimRight(value.string_value);
+      // CHAR padding is already stripped when a tuple is decoded; anything
+      // left, such as trailing spaces in a VARCHAR, is data.
+      return value.string_value;
   }
   return "";
 }
@@ -67,8 +69,10 @@ int CompareValues(const Value& left, const Value& right) {
     if (a > b) return 1;
     return 0;
   }
-  const std::string a = ValueToString(left);
-  const std::string b = ValueToString(right);
+  // Strings compare with PAD SPACE semantics (trailing spaces are not
+  // significant), so CHAR(n) columns match unpadded literals.
+  const std::string a = TrimRight(ValueToString(left));
+  const std::string b = TrimRight(ValueToString(right));
   if (a < b) return -1;
   if (a > b) return 1;
   return 0;

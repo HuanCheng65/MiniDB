@@ -62,10 +62,26 @@ class Segment {
   Status Drop(Transaction* txn);
 
   page_id_t header_page() const { return header_page_; }
+  // The first page allocated after the segment header; TableHeap never frees
+  // it so that an emptied table keeps one heap page (design doc 7.4).
+  bool IsFirstDataPage(page_id_t page_id) const {
+    return page_id == header_page_ + 1;
+  }
   segment_id_t segment_id() const { return segment_id_; }
   SegmentType segment_type() const { return segment_type_; }
   uint32_t page_count() const { return page_count_; }
   size_t extent_count() const;
+  // Extent-list length including holes; spno values range over this.
+  size_t extent_slots() const { return extents_.size(); }
+  const std::vector<ExtentEntry>& extents() const { return extents_; }
+  uint32_t insert_hint() const { return insert_hint_spno_; }
+  // True for an allocated page that is not the segment header or an
+  // extent-list page, i.e. a page that may hold records.
+  bool IsAllocatedDataPage(page_id_t page_id) const;
+  // spno of an allocated page, or an error if the page is not in the segment.
+  Result<uint32_t> SpnoOfPage(page_id_t page_id) const;
+  // The FSM category (free bytes / 32) recorded for a page.
+  Result<uint8_t> FreeSpaceCategory(page_id_t page_id);
 
   const std::shared_ptr<DiskManager>& data_disk() const;
   FreeSpaceMap& fsm() { return fsm_; }
@@ -97,6 +113,8 @@ class Segment {
   std::unordered_set<page_id_t> special_pages_;
   uint32_t page_count_ = 0;
   uint32_t insert_hint_spno_ = 0;
+  uint32_t persisted_insert_hint_ = 0;  // value last written to the header
+  uint32_t alloc_hint_slot_ = 0;  // where the last page allocation succeeded
 };
 
 }  // namespace minidb

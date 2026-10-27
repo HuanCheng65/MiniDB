@@ -58,10 +58,14 @@ class HeapPage {
                                HeapSlot* out);
 
   static Result<slot_id_t> Insert(std::byte* page, const std::byte* record,
-                                  uint16_t length);
+                                  uint16_t length, uint8_t flags = kSlotUsed);
   static Status Delete(std::byte* page, slot_id_t slot);
   static Status UpdateInPlace(std::byte* page, slot_id_t slot,
                               const std::byte* record, uint16_t length);
+  // Replaces a record with a possibly longer one on the same page, compacting
+  // when needed. The slot number and flags are kept (design doc 9.2 step 2).
+  static Status Replace(std::byte* page, slot_id_t slot,
+                        const std::byte* record, uint16_t length);
 
   static Result<std::vector<std::byte>> ReadRecord(const std::byte* page,
                                                    slot_id_t slot);
