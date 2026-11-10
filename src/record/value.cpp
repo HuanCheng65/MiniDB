@@ -65,11 +65,14 @@ int CompareValues(const Value& left, const Value& right) {
   // On Apple Silicon long double is only double precision. Compare integral
   // values directly so adjacent BIGINT keys beyond 2^53 remain distinct.
   const auto integral = [](ValueKind kind) {
-    return kind == ValueKind::kInt32 || kind == ValueKind::kInt64 || kind == ValueKind::kDate;
+    return kind == ValueKind::kInt32 || kind == ValueKind::kInt64 ||
+           kind == ValueKind::kDate;
   };
   if (integral(left.kind) && integral(right.kind)) {
-    const int64_t a = left.kind == ValueKind::kInt64 ? left.int64_value : left.int32_value;
-    const int64_t b = right.kind == ValueKind::kInt64 ? right.int64_value : right.int32_value;
+    const int64_t a =
+        left.kind == ValueKind::kInt64 ? left.int64_value : left.int32_value;
+    const int64_t b =
+        right.kind == ValueKind::kInt64 ? right.int64_value : right.int32_value;
     return a < b ? -1 : a > b ? 1 : 0;
   }
   if (IsNumeric(left.kind) && IsNumeric(right.kind)) {

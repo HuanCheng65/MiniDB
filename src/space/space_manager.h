@@ -44,9 +44,7 @@ class SpaceManager {
   Result<std::unique_ptr<Segment>> OpenSegment(page_id_t header_page,
                                                FreeSpaceMap& fsm);
 
-  static size_t BitmapBitCount() {
-    return (kPageSize - kBitmapOffset) * 8;
-  }
+  static size_t BitmapBitCount() { return (kPageSize - kBitmapOffset) * 8; }
 
   DiskManager& disk() { return *disk_; }
   const DiskManager::Ptr& disk_ptr() const { return disk_; }

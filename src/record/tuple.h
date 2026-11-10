@@ -14,7 +14,8 @@ namespace minidb {
 
 class Tuple {
  public:
-  static constexpr size_t kHeaderSize = 18;  // txn_id(8) + undo_ptr(8) + info(2)
+  static constexpr size_t kHeaderSize =
+      18;  // txn_id(8) + undo_ptr(8) + info(2)
 
   Tuple() = default;
 

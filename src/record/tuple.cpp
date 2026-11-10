@@ -14,8 +14,9 @@ constexpr uint16_t kInfoDeleted = 0x0001;
 void WriteFixed(std::byte* data, const Column& column, const Value& value) {
   switch (column.type) {
     case TypeId::kInt32: {
-      int32_t v = value.kind == ValueKind::kInt32 ? value.int32_value
-                                                  : static_cast<int32_t>(value.int64_value);
+      int32_t v = value.kind == ValueKind::kInt32
+                      ? value.int32_value
+                      : static_cast<int32_t>(value.int64_value);
       std::memcpy(data, &v, sizeof(v));
       break;
     }
@@ -197,8 +198,9 @@ Result<Tuple> Tuple::FromValues(const Schema& schema,
       var_cursor += value.string_value.size();
       const uint16_t end = static_cast<uint16_t>(var_cursor);
       std::memcpy(base + var_offset_start + entry, &end, sizeof(end));
-      std::memcpy(base + var_data_start + var_cursor - value.string_value.size(),
-                  value.string_value.data(), value.string_value.size());
+      std::memcpy(
+          base + var_data_start + var_cursor - value.string_value.size(),
+          value.string_value.data(), value.string_value.size());
     }
   }
 
@@ -206,8 +208,7 @@ Result<Tuple> Tuple::FromValues(const Schema& schema,
 }
 
 Result<std::vector<Value>> Tuple::Decode(const Schema& schema,
-                                         const std::byte* data,
-                                         size_t length) {
+                                         const std::byte* data, size_t length) {
   if (length < kHeaderSize) {
     return Status(StatusCode::kCorruption, "tuple shorter than record header");
   }
@@ -226,8 +227,9 @@ Result<std::vector<Value>> Tuple::Decode(const Schema& schema,
 
   for (size_t i = 0; i < schema.num_columns(); ++i) {
     const Column& column = schema.GetColumn(i);
-    const bool is_null = (data[kHeaderSize + i / 8] &
-                          static_cast<std::byte>(1u << (i % 8))) != std::byte{0};
+    const bool is_null =
+        (data[kHeaderSize + i / 8] & static_cast<std::byte>(1u << (i % 8))) !=
+        std::byte{0};
     if (is_null) {
       if (!column.nullable) {
         return Status(StatusCode::kCorruption,

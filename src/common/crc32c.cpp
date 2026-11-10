@@ -30,8 +30,9 @@ constexpr CrcTable kTable{};
 #ifdef MINIDB_CRC32C_X86
 // Compiled for SSE4.2 but only called after a runtime CPU check, so the
 // binary still runs on machines without the instruction (design doc G5).
-__attribute__((target("sse4.2"))) uint32_t Crc32cHardware(
-    uint32_t crc, const void* data, size_t length) {
+__attribute__((target("sse4.2"))) uint32_t Crc32cHardware(uint32_t crc,
+                                                          const void* data,
+                                                          size_t length) {
   const auto* bytes = static_cast<const uint8_t*>(data);
   uint64_t state = ~crc;
   while (length >= sizeof(uint64_t)) {

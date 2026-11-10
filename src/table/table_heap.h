@@ -65,7 +65,8 @@ class TableHeap {
   }
 
  private:
-  Result<RID> InsertRecord(Transaction* txn, const std::vector<std::byte>& record,
+  Result<RID> InsertRecord(Transaction* txn,
+                           const std::vector<std::byte>& record,
                            uint8_t slot_flags);
   // Reads the record stored exactly at rid (no forwarding, no visibility).
   Result<Tuple> ReadAt(RID rid);

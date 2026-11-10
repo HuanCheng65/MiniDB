@@ -93,7 +93,8 @@ Result<WritePageGuard> FreeSpaceMap::WritePage(uint32_t page_index) {
       return Status(StatusCode::kCorruption, "bad FSM page type");
     }
     MINIDB_LOG_WARN("FSM") << "file=" << disk_->name() << " FSM page "
-                           << page_index << " was never written; reinitializing";
+                           << page_index
+                           << " was never written; reinitializing";
     InitPageHeader(guard.value().MutableData(), PageType::kFsm, 1 + page_index,
                    disk_->header().table_id);
   }

@@ -13,7 +13,8 @@ namespace minidb {
 namespace {
 
 std::vector<Value> DecodeRow(const TableHeap& heap, const Tuple& tuple) {
-  auto decoded = Tuple::Decode(heap.schema(), tuple.data().data(), tuple.size());
+  auto decoded =
+      Tuple::Decode(heap.schema(), tuple.data().data(), tuple.size());
   if (!decoded.ok()) return {};
   return decoded.TakeValue();
 }
@@ -87,31 +88,31 @@ std::string Catalog::ChooseFileName(const std::string& table_name,
 
 Result<std::unique_ptr<Catalog>> Catalog::Bootstrap(
     const std::string& directory, BufferPool& buffer_pool, LogManager& log) {
-  auto catalog = std::unique_ptr<Catalog>(
-      new Catalog(directory, buffer_pool, log));
+  auto catalog =
+      std::unique_ptr<Catalog>(new Catalog(directory, buffer_pool, log));
 
   Transaction txn(1);
   const Schema tables_schema = SysTablesSchema();
   const Schema columns_schema = SysColumnsSchema();
 
-  auto sys_tables = catalog->CreateRelation(
-      &txn, kSysTablesId, "sys_tables", "sys_tables.dat", "sys_tables.fsm",
-      tables_schema, /*is_system=*/true);
+  auto sys_tables = catalog->CreateRelation(&txn, kSysTablesId, "sys_tables",
+                                            "sys_tables.dat", "sys_tables.fsm",
+                                            tables_schema, /*is_system=*/true);
   if (!sys_tables.ok()) return sys_tables.status();
   auto sys_columns = catalog->CreateRelation(
-      &txn, kSysColumnsId, "sys_columns", "sys_columns.dat",
-      "sys_columns.fsm", columns_schema, /*is_system=*/true);
+      &txn, kSysColumnsId, "sys_columns", "sys_columns.dat", "sys_columns.fsm",
+      columns_schema, /*is_system=*/true);
   if (!sys_columns.ok()) return sys_columns.status();
 
   catalog->sys_tables_heap_ = sys_tables.value()->heap.get();
   catalog->sys_columns_heap_ = sys_columns.value()->heap.get();
   catalog->next_table_id_ = kSysColumnsId + 1;
 
-  Status status = catalog->InsertSysTableRow(&txn, *sys_tables.value(),
-                                             sys_tables.value()->segment->header_page());
+  Status status = catalog->InsertSysTableRow(
+      &txn, *sys_tables.value(), sys_tables.value()->segment->header_page());
   if (!status.ok()) return status;
-  status = catalog->InsertSysTableRow(&txn, *sys_columns.value(),
-                                      sys_columns.value()->segment->header_page());
+  status = catalog->InsertSysTableRow(
+      &txn, *sys_columns.value(), sys_columns.value()->segment->header_page());
   if (!status.ok()) return status;
 
   status = catalog->InsertSysColumnRows(&txn, kSysTablesId, tables_schema);
@@ -132,12 +133,12 @@ Result<std::unique_ptr<Catalog>> Catalog::Open(const std::string& directory,
 
   Transaction txn(1);
   auto sys_tables = catalog->OpenRelation(
-      &txn, kSysTablesId, "sys_tables", "sys_tables.dat", "sys_tables.fsm",
-      0, SysTablesSchema(), /*is_system=*/true);
+      &txn, kSysTablesId, "sys_tables", "sys_tables.dat", "sys_tables.fsm", 0,
+      SysTablesSchema(), /*is_system=*/true);
   if (!sys_tables.ok()) return sys_tables.status();
   auto sys_columns = catalog->OpenRelation(
-      &txn, kSysColumnsId, "sys_columns", "sys_columns.dat",
-      "sys_columns.fsm", 0, SysColumnsSchema(), /*is_system=*/true);
+      &txn, kSysColumnsId, "sys_columns", "sys_columns.dat", "sys_columns.fsm",
+      0, SysColumnsSchema(), /*is_system=*/true);
   if (!sys_columns.ok()) return sys_columns.status();
 
   catalog->sys_tables_heap_ = sys_tables.value()->heap.get();
@@ -151,8 +152,7 @@ Result<std::unique_ptr<Catalog>> Catalog::Open(const std::string& directory,
 }
 
 Result<TableInfo*> Catalog::OpenRelation(Transaction* /*txn*/,
-                                         uint32_t table_id,
-                                         std::string name,
+                                         uint32_t table_id, std::string name,
                                          std::string data_file,
                                          std::string fsm_file,
                                          page_id_t segment_page, Schema schema,
@@ -162,8 +162,7 @@ Result<TableInfo*> Catalog::OpenRelation(Transaction* /*txn*/,
                   "catalog contains an unsafe relation file name");
   }
 
-  auto data_disk =
-      DiskManager::Open(FilePath(data_file), FileKind::kData);
+  auto data_disk = DiskManager::Open(FilePath(data_file), FileKind::kData);
   if (!data_disk.ok()) return data_disk.status();
   auto fsm_disk = DiskManager::Open(FilePath(fsm_file), FileKind::kFsm);
   if (!fsm_disk.ok()) return fsm_disk.status();
@@ -177,10 +176,9 @@ Result<TableInfo*> Catalog::OpenRelation(Transaction* /*txn*/,
   info->schema = std::move(schema);
   info->data_disk = data_disk.TakeValue();
   info->fsm_disk = fsm_disk.TakeValue();
-  info->fsm =
-      std::make_shared<FreeSpaceMap>(info->fsm_disk, buffer_pool_);
-  info->space = std::make_unique<SpaceManager>(info->data_disk, buffer_pool_,
-                                               log_);
+  info->fsm = std::make_shared<FreeSpaceMap>(info->fsm_disk, buffer_pool_);
+  info->space =
+      std::make_unique<SpaceManager>(info->data_disk, buffer_pool_, log_);
 
   // Segment headers are recorded in sys_tables. The system relations are
   // opened first, so their header pages come from the data file header.
@@ -192,8 +190,7 @@ Result<TableInfo*> Catalog::OpenRelation(Transaction* /*txn*/,
                   "relation " + info->name + " has no segment header page");
   }
 
-  auto segment =
-      info->space->OpenSegment(actual_segment_page, *info->fsm);
+  auto segment = info->space->OpenSegment(actual_segment_page, *info->fsm);
   if (!segment.ok()) return segment.status();
   info->segment = std::shared_ptr<Segment>(segment.TakeValue().release());
   info->heap = std::make_unique<TableHeap>(info->segment, info->schema,
@@ -230,10 +227,9 @@ Result<TableInfo*> Catalog::CreateRelation(Transaction* txn, uint32_t table_id,
   info->schema = std::move(schema);
   info->data_disk = data_disk.TakeValue();
   info->fsm_disk = fsm_disk.TakeValue();
-  info->fsm =
-      std::make_shared<FreeSpaceMap>(info->fsm_disk, buffer_pool_);
-  info->space = std::make_unique<SpaceManager>(info->data_disk, buffer_pool_,
-                                               log_);
+  info->fsm = std::make_shared<FreeSpaceMap>(info->fsm_disk, buffer_pool_);
+  info->space =
+      std::make_unique<SpaceManager>(info->data_disk, buffer_pool_, log_);
 
   const auto cleanup_files = [&]() {
     buffer_pool_.DiscardFile(info->fsm_disk->file_id());
@@ -359,9 +355,9 @@ Status Catalog::LoadSystemCatalog() {
     auto schema = Schema::Make(found->second);
     if (!schema.ok()) return schema.status();
 
-    auto relation = OpenRelation(nullptr, table_id, table_name, data_file,
-                                 fsm_file, segment_page, schema.TakeValue(),
-                                 is_system);
+    auto relation =
+        OpenRelation(nullptr, table_id, table_name, data_file, fsm_file,
+                     segment_page, schema.TakeValue(), is_system);
     if (!relation.ok()) return relation.status();
   }
   if (!tables_iterator.status().ok()) return tables_iterator.status();
@@ -549,10 +545,9 @@ std::vector<TableInfo*> Catalog::Tables() const {
   std::vector<TableInfo*> result;
   result.reserve(tables_.size());
   for (const auto& entry : tables_) result.push_back(entry.second.get());
-  std::sort(result.begin(), result.end(),
-            [](const TableInfo* a, const TableInfo* b) {
-              return a->name < b->name;
-            });
+  std::sort(
+      result.begin(), result.end(),
+      [](const TableInfo* a, const TableInfo* b) { return a->name < b->name; });
   return result;
 }
 
@@ -568,8 +563,8 @@ Status Catalog::BeginSession(bool existing_database) {
   for (auto& entry : tables_) {
     TableInfo& table = *entry.second;
     if (existing_database && table.data_disk->header().clean_shutdown == 0) {
-      MINIDB_LOG_WARN("DB") << "relation " << table.name
-                            << " was not shut down cleanly";
+      MINIDB_LOG_WARN("DB")
+          << "relation " << table.name << " was not shut down cleanly";
     }
     table.data_disk->header().clean_shutdown = 0;
     Status status = table.data_disk->PersistHeader();

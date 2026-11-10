@@ -21,9 +21,12 @@ std::string DotEscape(const std::string& text) {
   std::string out;
   for (unsigned char c : text) {
     if (c == '"' || c == '\\') out += '\\';
-    if (c == '\n') out += "\\n";
-    else if (c < 32 || c == 127) out += '?';
-    else out += static_cast<char>(c);
+    if (c == '\n')
+      out += "\\n";
+    else if (c < 32 || c == 127)
+      out += '?';
+    else
+      out += static_cast<char>(c);
   }
   return out;
 }
@@ -39,13 +42,17 @@ BPlusTree::BPlusTree(BufferPool& pool, DiskManager::Ptr disk,
 }
 
 Status BPlusTree::ValidateMetadata(const IndexMetadata& m) {
-  if (m.type != TypeId::kInt32 && m.type != TypeId::kInt64 && !StringType(m.type))
+  if (m.type != TypeId::kInt32 && m.type != TypeId::kInt64 &&
+      !StringType(m.type))
     return Status(StatusCode::kNotSupported,
                   "indexes support INTEGER, BIGINT, CHAR and VARCHAR");
   if (StringType(m.type) && (m.length == 0 || m.length > 4000))
-    return Status(StatusCode::kNotSupported, "index string length must be 1..4000");
-  if (m.name.empty() || m.table.empty() || m.name.size() + m.table.size() > 8000)
-    return Status(StatusCode::kInvalidArgument, "invalid index/table name length");
+    return Status(StatusCode::kNotSupported,
+                  "index string length must be 1..4000");
+  if (m.name.empty() || m.table.empty() ||
+      m.name.size() + m.table.size() > 8000)
+    return Status(StatusCode::kInvalidArgument,
+                  "invalid index/table name length");
   return Status::Ok();
 }
 
@@ -55,7 +62,8 @@ Result<std::unique_ptr<BPlusTree>> BPlusTree::Create(
   if (!status.ok()) return status;
   auto disk = DiskManager::Create(path, FileKind::kIndex, metadata.table_id);
   if (!disk.ok()) return disk.status();
-  auto tree = std::unique_ptr<BPlusTree>(new BPlusTree(pool, disk.TakeValue(), metadata));
+  auto tree = std::unique_ptr<BPlusTree>(
+      new BPlusTree(pool, disk.TakeValue(), metadata));
   Node root;
   root.id = tree->root_;
   status = tree->Write(root);
@@ -66,7 +74,7 @@ Result<std::unique_ptr<BPlusTree>> BPlusTree::Create(
 }
 
 Result<std::unique_ptr<BPlusTree>> BPlusTree::Open(BufferPool& pool,
-                                                const std::string& path) {
+                                                   const std::string& path) {
   auto disk = DiskManager::Open(path, FileKind::kIndex);
   if (!disk.ok()) return disk.status();
   auto guard = pool.FetchRead(disk.value(), 1);
@@ -85,7 +93,8 @@ Result<std::unique_ptr<BPlusTree>> BPlusTree::Open(BufferPool& pool,
   m.table.assign(reinterpret_cast<const char*>(p + 80 + names), table);
   auto status = ValidateMetadata(m);
   if (!status.ok()) return Corrupt(status.message());
-  auto tree = std::unique_ptr<BPlusTree>(new BPlusTree(pool, disk.TakeValue(), m));
+  auto tree =
+      std::unique_ptr<BPlusTree>(new BPlusTree(pool, disk.TakeValue(), m));
   tree->root_ = ReadU32(p, 52);
   tree->next_page_ = ReadU32(p, 56);
   tree->free_head_ = ReadU32(p, 60);
@@ -99,7 +108,8 @@ Result<std::unique_ptr<BPlusTree>> BPlusTree::Open(BufferPool& pool,
 }
 
 Status BPlusTree::SaveMetadata() {
-  auto guard = pool_.NewPage(disk_, 1, PageType::kBtreeMeta, metadata_.table_id);
+  auto guard =
+      pool_.NewPage(disk_, 1, PageType::kBtreeMeta, metadata_.table_id);
   if (!guard.ok()) return guard.status();
   auto* p = guard.value().MutableData();
   WriteU32(p, 32, kIndexVersion);
@@ -113,14 +123,16 @@ Status BPlusTree::SaveMetadata() {
   WriteU32(p, 60, free_head_);
   WriteU64(p, 64, entries_);
   std::memcpy(p + 80, metadata_.name.data(), metadata_.name.size());
-  std::memcpy(p + 80 + metadata_.name.size(), metadata_.table.data(), metadata_.table.size());
+  std::memcpy(p + 80 + metadata_.name.size(), metadata_.table.data(),
+              metadata_.table.size());
   return Status::Ok();
 }
 
 int BPlusTree::Compare(const IndexEntry& a, const IndexEntry& b) {
   const int key = CompareValues(a.key, b.key);
   if (key) return key;
-  if (a.rid.page_id != b.rid.page_id) return a.rid.page_id < b.rid.page_id ? -1 : 1;
+  if (a.rid.page_id != b.rid.page_id)
+    return a.rid.page_id < b.rid.page_id ? -1 : 1;
   return a.rid.slot < b.rid.slot ? -1 : a.rid.slot > b.rid.slot ? 1 : 0;
 }
 
@@ -158,7 +170,8 @@ Result<BPlusTree::Node> BPlusTree::Read(page_id_t id) {
     if (StringType(metadata_.type)) {
       const size_t len = ReadU16(p, off);
       if (len > metadata_.length) return Corrupt("invalid string key length");
-      key = Value::String(std::string(reinterpret_cast<const char*>(p + off + 2), len));
+      key = Value::String(
+          std::string(reinterpret_cast<const char*>(p + off + 2), len));
     } else {
       int64_t value;
       std::memcpy(&value, p + off, 8);
@@ -167,16 +180,21 @@ Result<BPlusTree::Node> BPlusTree::Read(page_id_t id) {
     off += key_bytes_;
     n.keys.push_back({std::move(key), {ReadU32(p, off), ReadU16(p, off + 4)}});
     off += 6;
-    if (!n.leaf) { n.children.push_back(ReadU32(p, off)); off += 4; }
+    if (!n.leaf) {
+      n.children.push_back(ReadU32(p, off));
+      off += 4;
+    }
   }
   return n;
 }
 
 Status BPlusTree::Write(const Node& n) {
-  if (n.keys.size() > capacity_ || (!n.leaf && n.children.size() != n.keys.size() + 1))
+  if (n.keys.size() > capacity_ ||
+      (!n.leaf && n.children.size() != n.keys.size() + 1))
     return Status(StatusCode::kInternal, "invalid B+ node write");
-  auto guard = pool_.NewPage(disk_, n.id,
-      n.leaf ? PageType::kBtreeLeaf : PageType::kBtreeInternal, metadata_.table_id);
+  auto guard = pool_.NewPage(
+      disk_, n.id, n.leaf ? PageType::kBtreeLeaf : PageType::kBtreeInternal,
+      metadata_.table_id);
   if (!guard.ok()) return guard.status();
   auto* p = guard.value().MutableData();
   WriteU16(p, 32, static_cast<uint16_t>(n.keys.size()));
@@ -187,17 +205,22 @@ Status BPlusTree::Write(const Node& n) {
     const auto& entry = n.keys[i];
     if (StringType(metadata_.type)) {
       WriteU16(p, off, static_cast<uint16_t>(entry.key.string_value.size()));
-      std::memcpy(p + off + 2, entry.key.string_value.data(), entry.key.string_value.size());
+      std::memcpy(p + off + 2, entry.key.string_value.data(),
+                  entry.key.string_value.size());
     } else {
       const int64_t value = entry.key.kind == ValueKind::kInt32
-          ? entry.key.int32_value : entry.key.int64_value;
+                                ? entry.key.int32_value
+                                : entry.key.int64_value;
       std::memcpy(p + off, &value, 8);
     }
     off += key_bytes_;
     WriteU32(p, off, entry.rid.page_id);
     WriteU16(p, off + 4, entry.rid.slot);
     off += 6;
-    if (!n.leaf) { WriteU32(p, off, n.children[i + 1]); off += 4; }
+    if (!n.leaf) {
+      WriteU32(p, off, n.children[i + 1]);
+      off += 4;
+    }
   }
   return Status::Ok();
 }
@@ -212,7 +235,8 @@ Result<page_id_t> BPlusTree::Allocate() {
     free_head_ = ReadU32(guard.value().Data(), 32);
     return id;
   }
-  if (next_page_ == kInvalidPageId) return Status(StatusCode::kNoSpace, "index file full");
+  if (next_page_ == kInvalidPageId)
+    return Status(StatusCode::kNoSpace, "index file full");
   if (next_page_ >= disk_->PageCount()) {
     auto status = disk_->ExtendTo(disk_->header().file_extents + 1);
     if (!status.ok()) return status;
@@ -223,7 +247,8 @@ Result<page_id_t> BPlusTree::Allocate() {
 }
 
 Status BPlusTree::Free(page_id_t id) {
-  auto guard = pool_.NewPage(disk_, id, PageType::kBtreeFree, metadata_.table_id);
+  auto guard =
+      pool_.NewPage(disk_, id, PageType::kBtreeFree, metadata_.table_id);
   if (!guard.ok()) return guard.status();
   WriteU32(guard.value().MutableData(), 32, free_head_);
   free_head_ = id;
@@ -236,14 +261,18 @@ Result<std::optional<BPlusTree::Split>> BPlusTree::InsertNode(
   if (!loaded.ok()) return loaded.status();
   Node n = loaded.TakeValue();
   if (n.leaf) {
-    auto at = std::lower_bound(n.keys.begin(), n.keys.end(), entry,
-                              [](const auto& a, const auto& b) { return Compare(a,b) < 0; });
+    auto at = std::lower_bound(
+        n.keys.begin(), n.keys.end(), entry,
+        [](const auto& a, const auto& b) { return Compare(a, b) < 0; });
     if (at != n.keys.end() && Compare(*at, entry) == 0)
       return Status(StatusCode::kAlreadyExists, "index entry already exists");
     n.keys.insert(at, entry);
   } else {
     const size_t at = std::upper_bound(n.keys.begin(), n.keys.end(), entry,
-        [](const auto& a, const auto& b) { return Compare(a,b) < 0; }) - n.keys.begin();
+                                       [](const auto& a, const auto& b) {
+                                         return Compare(a, b) < 0;
+                                       }) -
+                      n.keys.begin();
     auto split = InsertNode(n.children[at], entry);
     if (!split.ok()) return split.status();
     if (!split.value()) return std::optional<Split>{};
@@ -356,7 +385,8 @@ Status BPlusTree::Rebalance(Node* parent, size_t at) {
   Node left = l.TakeValue(), right = r.TakeValue();
   if (!left.leaf) left.keys.push_back(parent->keys[left_at]);
   left.keys.insert(left.keys.end(), right.keys.begin(), right.keys.end());
-  left.children.insert(left.children.end(), right.children.begin(), right.children.end());
+  left.children.insert(left.children.end(), right.children.begin(),
+                       right.children.end());
   left.next = right.next;
   auto s = Write(left);
   if (!s.ok()) return s;
@@ -372,14 +402,18 @@ Status BPlusTree::EraseNode(page_id_t id, const IndexEntry& entry) {
   if (!loaded.ok()) return loaded.status();
   Node n = loaded.TakeValue();
   if (n.leaf) {
-    auto at = std::lower_bound(n.keys.begin(), n.keys.end(), entry,
-        [](const auto& a, const auto& b) { return Compare(a,b) < 0; });
+    auto at = std::lower_bound(
+        n.keys.begin(), n.keys.end(), entry,
+        [](const auto& a, const auto& b) { return Compare(a, b) < 0; });
     if (at == n.keys.end() || Compare(*at, entry) != 0)
       return Status(StatusCode::kNotFound, "index entry not found");
     n.keys.erase(at);
   } else {
     const size_t at = std::upper_bound(n.keys.begin(), n.keys.end(), entry,
-        [](const auto& a, const auto& b) { return Compare(a,b) < 0; }) - n.keys.begin();
+                                       [](const auto& a, const auto& b) {
+                                         return Compare(a, b) < 0;
+                                       }) -
+                      n.keys.begin();
     auto s = EraseNode(n.children[at], entry);
     if (!s.ok()) return s;
     s = Rebalance(&n, at);
@@ -411,20 +445,26 @@ Result<page_id_t> BPlusTree::FindLeaf(const IndexEntry& entry) {
     auto n = Read(id);
     if (!n.ok()) return n.status();
     if (n.value().leaf) return id;
-    const size_t at = std::upper_bound(n.value().keys.begin(), n.value().keys.end(), entry,
-        [](const auto& a, const auto& b) { return Compare(a,b) < 0; }) - n.value().keys.begin();
+    const size_t at =
+        std::upper_bound(
+            n.value().keys.begin(), n.value().keys.end(), entry,
+            [](const auto& a, const auto& b) { return Compare(a, b) < 0; }) -
+        n.value().keys.begin();
     id = n.value().children[at];
   }
   return Corrupt("tree depth/cycle");
 }
 
 Status BPlusTree::Scan(const std::string& op, const Value& key,
-                      const std::function<bool(const IndexEntry&)>& visitor) {
-  if (op != "=" && op != "<" && op != "<=" && op != ">" && op != ">=" && op != "!=" && op != "<>")
+                       const std::function<bool(const IndexEntry&)>& visitor) {
+  if (op != "=" && op != "<" && op != "<=" && op != ">" && op != ">=" &&
+      op != "!=" && op != "<>")
     return Status(StatusCode::kInvalidArgument, "unsupported index comparison");
   // Query bounds may be longer than the column; they need no on-disk encoding.
-  if (!key.IsNull() && (StringType(metadata_.type) ? key.kind != ValueKind::kString
-      : key.kind != ValueKind::kInt32 && key.kind != ValueKind::kInt64))
+  if (!key.IsNull() &&
+      (StringType(metadata_.type)
+           ? key.kind != ValueKind::kString
+           : key.kind != ValueKind::kInt32 && key.kind != ValueKind::kInt64))
     return Status(StatusCode::kTypeMismatch, "wrong index bound type");
   if (key.IsNull()) return Status::Ok();
   page_id_t id = root_;
@@ -433,7 +473,7 @@ Status BPlusTree::Scan(const std::string& op, const Value& key,
     if (!leaf.ok()) return leaf.status();
     id = leaf.value();
   } else {
-    for (size_t depth = 0; ; ++depth) {
+    for (size_t depth = 0;; ++depth) {
       if (depth >= 64) return Corrupt("tree depth/cycle");
       auto n = Read(id);
       if (!n.ok()) return n.status();
@@ -449,10 +489,15 @@ Status BPlusTree::Scan(const std::string& op, const Value& key,
     if (!n.value().leaf) return Corrupt("non-leaf in leaf chain");
     for (const auto& e : n.value().keys) {
       const int cmp = CompareValues(e.key, key);
-      if ((op == "=" && cmp > 0) || (op == "<" && cmp >= 0) || (op == "<=" && cmp > 0))
+      if ((op == "=" && cmp > 0) || (op == "<" && cmp >= 0) ||
+          (op == "<=" && cmp > 0))
         return Status::Ok();
-      const bool match = op == "=" ? cmp == 0 : op == "<" ? cmp < 0 :
-          op == "<=" ? cmp <= 0 : op == ">" ? cmp > 0 : op == ">=" ? cmp >= 0 : cmp != 0;
+      const bool match = op == "="    ? cmp == 0
+                         : op == "<"  ? cmp < 0
+                         : op == "<=" ? cmp <= 0
+                         : op == ">"  ? cmp > 0
+                         : op == ">=" ? cmp >= 0
+                                      : cmp != 0;
       if (match && !visitor(e)) return Status::Ok();
     }
     id = n.value().next;
@@ -462,7 +507,10 @@ Status BPlusTree::Scan(const std::string& op, const Value& key,
 
 Result<std::vector<RID>> BPlusTree::Find(const Value& key) {
   std::vector<RID> result;
-  auto s = Scan("=", key, [&](const IndexEntry& entry) { result.push_back(entry.rid); return true; });
+  auto s = Scan("=", key, [&](const IndexEntry& entry) {
+    result.push_back(entry.rid);
+    return true;
+  });
   if (!s.ok()) return s;
   return result;
 }
@@ -474,36 +522,48 @@ Result<IndexStats> BPlusTree::Validate() {
   std::set<page_id_t> seen;
   std::vector<page_id_t> leaves;
   std::optional<IndexEntry> previous;
-  std::function<Status(page_id_t, uint32_t, std::optional<IndexEntry>, std::optional<IndexEntry>)> visit;
+  std::function<Status(page_id_t, uint32_t, std::optional<IndexEntry>,
+                       std::optional<IndexEntry>)>
+      visit;
   visit = [&](page_id_t id, uint32_t depth, std::optional<IndexEntry> low,
               std::optional<IndexEntry> high) -> Status {
-    if (depth > 64 || !seen.insert(id).second) return Corrupt("duplicate child/cycle");
+    if (depth > 64 || !seen.insert(id).second)
+      return Corrupt("duplicate child/cycle");
     auto n = Read(id);
     if (!n.ok()) return n.status();
     const auto& node = n.value();
     ++stats.nodes;
-    if (id != root_ && node.keys.size() < capacity_ / 2) return Corrupt("underfull node");
-    if (id == root_ && !node.leaf && node.keys.empty()) return Corrupt("empty internal root");
+    if (id != root_ && node.keys.size() < capacity_ / 2)
+      return Corrupt("underfull node");
+    if (id == root_ && !node.leaf && node.keys.empty())
+      return Corrupt("empty internal root");
     for (size_t i = 0; i < node.keys.size(); ++i) {
-      if (i && Compare(node.keys[i - 1], node.keys[i]) >= 0) return Corrupt("unsorted keys");
-      if (low && Compare(node.keys[i], *low) < 0) return Corrupt("key below fence");
-      if (high && Compare(node.keys[i], *high) >= 0) return Corrupt("key above fence");
+      if (i && Compare(node.keys[i - 1], node.keys[i]) >= 0)
+        return Corrupt("unsorted keys");
+      if (low && Compare(node.keys[i], *low) < 0)
+        return Corrupt("key below fence");
+      if (high && Compare(node.keys[i], *high) >= 0)
+        return Corrupt("key above fence");
     }
     if (node.leaf) {
-      if (stats.height && stats.height != depth) return Corrupt("unbalanced leaf depths");
+      if (stats.height && stats.height != depth)
+        return Corrupt("unbalanced leaf depths");
       stats.height = depth;
       ++stats.leaves;
       stats.entries += node.keys.size();
       leaves.push_back(id);
       for (const auto& e : node.keys) {
-        if (previous && Compare(*previous, e) >= 0) return Corrupt("leaf order");
+        if (previous && Compare(*previous, e) >= 0)
+          return Corrupt("leaf order");
         previous = e;
       }
     } else {
       for (size_t i = 0; i < node.children.size(); ++i) {
-        auto s = visit(node.children[i], depth + 1,
-                       i ? std::optional<IndexEntry>(node.keys[i - 1]) : low,
-                       i < node.keys.size() ? std::optional<IndexEntry>(node.keys[i]) : high);
+        auto s =
+            visit(node.children[i], depth + 1,
+                  i ? std::optional<IndexEntry>(node.keys[i - 1]) : low,
+                  i < node.keys.size() ? std::optional<IndexEntry>(node.keys[i])
+                                       : high);
         if (!s.ok()) return s;
       }
     }
@@ -515,7 +575,8 @@ Result<IndexStats> BPlusTree::Validate() {
   for (size_t i = 0; i < leaves.size(); ++i) {
     auto n = Read(leaves[i]);
     if (!n.ok()) return n.status();
-    if (n.value().next != (i + 1 < leaves.size() ? leaves[i + 1] : kInvalidPageId))
+    if (n.value().next !=
+        (i + 1 < leaves.size() ? leaves[i + 1] : kInvalidPageId))
       return Corrupt("broken leaf link");
   }
   page_id_t free = free_head_;
@@ -524,37 +585,43 @@ Result<IndexStats> BPlusTree::Validate() {
       return Corrupt("free list cycle/overlap");
     auto guard = pool_.FetchRead(disk_, free);
     if (!guard.ok()) return guard.status();
-    if (GetPageType(guard.value().Data()) != PageType::kBtreeFree) return Corrupt("free page type");
+    if (GetPageType(guard.value().Data()) != PageType::kBtreeFree)
+      return Corrupt("free page type");
     free = ReadU32(guard.value().Data(), 32);
     ++stats.free_pages;
   }
-  if (seen.size() != next_page_ - 2) return Corrupt("unreachable allocated page");
+  if (seen.size() != next_page_ - 2)
+    return Corrupt("unreachable allocated page");
   return stats;
 }
 
 Result<std::string> BPlusTree::Dot(size_t max_nodes) {
   std::ostringstream out;
-  out << "digraph BPlusTree {\n  rankdir=TB;\n  node [shape=box, fontname=\"monospace\"];\n";
+  out << "digraph BPlusTree {\n  rankdir=TB;\n  node [shape=box, "
+         "fontname=\"monospace\"];\n";
   std::queue<page_id_t> pending;
   std::set<page_id_t> seen;
   pending.push(root_);
   while (!pending.empty()) {
-    const auto id = pending.front(); pending.pop();
+    const auto id = pending.front();
+    pending.pop();
     if (!seen.insert(id).second) return Corrupt("cycle in visualization");
     if (seen.size() > max_nodes) {
-      out << "  truncated [label=\"Display limited to " << max_nodes << " nodes\"];\n";
+      out << "  truncated [label=\"Display limited to " << max_nodes
+          << " nodes\"];\n";
       break;
     }
     auto loaded = Read(id);
     if (!loaded.ok()) return loaded.status();
     const auto& n = loaded.value();
-    out << "  p" << id << " [label=\"" << (n.leaf ? "Leaf" : "Internal") << " p" << id
-        << " (" << n.keys.size() << " keys)";
+    out << "  p" << id << " [label=\"" << (n.leaf ? "Leaf" : "Internal") << " p"
+        << id << " (" << n.keys.size() << " keys)";
     for (size_t i = 0; i < std::min<size_t>(n.keys.size(), 6); ++i) {
       const auto& e = n.keys[i];
       auto key = ValueToString(e.key);
       if (key.size() > 40) key = key.substr(0, 40) + "...";
-      out << "\\n" << DotEscape(key) << " @" << e.rid.page_id << ":" << e.rid.slot;
+      out << "\\n"
+          << DotEscape(key) << " @" << e.rid.page_id << ":" << e.rid.slot;
     }
     if (n.keys.size() > 6) out << "\\n...";
     out << "\"];\n";
@@ -563,7 +630,8 @@ Result<std::string> BPlusTree::Dot(size_t max_nodes) {
       pending.push(child);
     }
     if (n.leaf && n.next != kInvalidPageId)
-      out << "  p" << id << " -> p" << n.next << " [style=dashed, color=blue, constraint=false];\n";
+      out << "  p" << id << " -> p" << n.next
+          << " [style=dashed, color=blue, constraint=false];\n";
   }
   out << "}\n";
   return out.str();
@@ -574,24 +642,32 @@ Result<std::string> BPlusTree::Draw(size_t max_nodes) {
   std::set<page_id_t> seen;
   std::function<Status(page_id_t, std::string, bool)> draw;
   draw = [&](page_id_t id, std::string prefix, bool last) -> Status {
-    if (seen.size() >= max_nodes) { out << prefix << "... (display limit)\n"; return Status::Ok(); }
+    if (seen.size() >= max_nodes) {
+      out << prefix << "... (display limit)\n";
+      return Status::Ok();
+    }
     if (!seen.insert(id).second) return Corrupt("cycle in visualization");
     auto loaded = Read(id);
     if (!loaded.ok()) return loaded.status();
     const auto& n = loaded.value();
-    out << prefix << (last ? "`-- " : "|-- ") << (n.leaf ? "LEAF " : "INTERNAL ")
-        << "p" << id << " [" << n.keys.size() << "] ";
+    out << prefix << (last ? "`-- " : "|-- ")
+        << (n.leaf ? "LEAF " : "INTERNAL ") << "p" << id << " ["
+        << n.keys.size() << "] ";
     for (size_t i = 0; i < std::min<size_t>(n.keys.size(), 4); ++i) {
       if (i) out << " | ";
       auto key = ValueToString(n.keys[i].key);
       if (key.size() > 32) key = key.substr(0, 32) + "...";
-      out << std::quoted(DotEscape(key)) << "@" << n.keys[i].rid.page_id << ":" << n.keys[i].rid.slot;
+      out << std::quoted(DotEscape(key)) << "@" << n.keys[i].rid.page_id << ":"
+          << n.keys[i].rid.slot;
     }
     if (n.keys.size() > 4) out << " | ...";
-    if (n.leaf) out << " -> " << (n.next == kInvalidPageId ? "END" : "p" + std::to_string(n.next));
+    if (n.leaf)
+      out << " -> "
+          << (n.next == kInvalidPageId ? "END" : "p" + std::to_string(n.next));
     out << "\n";
     for (size_t i = 0; i < n.children.size(); ++i) {
-      auto status = draw(n.children[i], prefix + (last ? "    " : "|   "), i + 1 == n.children.size());
+      auto status = draw(n.children[i], prefix + (last ? "    " : "|   "),
+                         i + 1 == n.children.size());
       if (!status.ok()) return status;
       if (seen.size() >= max_nodes) break;
     }
@@ -599,7 +675,8 @@ Result<std::string> BPlusTree::Draw(size_t max_nodes) {
   };
   auto status = draw(root_, "", true);
   if (!status.ok()) return status;
-  if (seen.size() >= max_nodes) out << "... display limited to " << max_nodes << " nodes\n";
+  if (seen.size() >= max_nodes)
+    out << "... display limited to " << max_nodes << " nodes\n";
   return out.str();
 }
 }  // namespace minidb

@@ -37,7 +37,8 @@ void CivilFromDays(int64_t z, int64_t* year, unsigned* month, unsigned* day) {
 bool ParseUnsigned(std::string_view text, size_t* pos, int* out) {
   int value = 0;
   bool any = false;
-  while (*pos < text.size() && std::isdigit(static_cast<unsigned char>(text[*pos]))) {
+  while (*pos < text.size() &&
+         std::isdigit(static_cast<unsigned char>(text[*pos]))) {
     any = true;
     value = value * 10 + (text[*pos] - '0');
     ++*pos;
@@ -147,9 +148,8 @@ Result<int64_t> ParseDecimal(std::string_view text, uint8_t scale) {
 }
 
 std::string FormatDecimal(int64_t value, uint8_t scale) {
-  uint64_t magnitude = value < 0
-                           ? static_cast<uint64_t>(-(value + 1)) + 1
-                           : static_cast<uint64_t>(value);
+  uint64_t magnitude = value < 0 ? static_cast<uint64_t>(-(value + 1)) + 1
+                                 : static_cast<uint64_t>(value);
   std::string digits = std::to_string(magnitude);
   std::string result;
   if (value < 0) result.push_back('-');

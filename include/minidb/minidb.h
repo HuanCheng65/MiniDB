@@ -5,10 +5,9 @@
  *
  *   mydb_db* db;
  *   if (mydb_open("data/tpch_db", NULL, &db) != MYDB_OK) { ... }
- *   if (mydb_exec(db, "CREATE TABLE t (a INTEGER NOT NULL);", NULL) != MYDB_OK) { ... }
- *   mydb_stmt* stmt;
- *   mydb_prepare(db, "SELECT * FROM t;", &stmt);
- *   while (mydb_step(stmt) == MYDB_ROW) { ... mydb_column_text(stmt, 0) ... }
+ *   if (mydb_exec(db, "CREATE TABLE t (a INTEGER NOT NULL);", NULL) != MYDB_OK)
+ * { ... } mydb_stmt* stmt; mydb_prepare(db, "SELECT * FROM t;", &stmt); while
+ * (mydb_step(stmt) == MYDB_ROW) { ... mydb_column_text(stmt, 0) ... }
  *   mydb_finalize(stmt);
  *   mydb_close(db);
  */
@@ -33,12 +32,7 @@ typedef struct mydb_config {
   const char* log_file;
 } mydb_config;
 
-enum mydb_rc {
-  MYDB_OK = 0,
-  MYDB_ERROR = 1,
-  MYDB_ROW = 100,
-  MYDB_DONE = 101
-};
+enum mydb_rc { MYDB_OK = 0, MYDB_ERROR = 1, MYDB_ROW = 100, MYDB_DONE = 101 };
 
 enum mydb_type {
   MYDB_TYPE_NULL = 0,
@@ -97,7 +91,7 @@ void mydb_free(void* pointer);
 const char* mydb_version(void);
 
 #ifdef __cplusplus
-}  /* extern "C" */
+} /* extern "C" */
 #endif
 
 #endif /* MINIDB_MINIDB_H */

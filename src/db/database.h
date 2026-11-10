@@ -2,15 +2,15 @@
 // (design doc 3.4, 18).
 #pragma once
 
-#include <memory>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "catalog/catalog.h"
 #include "common/status.h"
-#include "log/log_manager.h"
 #include "index/bplus_tree.h"
+#include "log/log_manager.h"
 #include "record/value.h"
 #include "sql/parser.h"
 #include "txn/txn_manager.h"
@@ -87,8 +87,8 @@ class Database {
   Status DropIndex(const std::string& name);
   Status DropTableIndexes(const TableInfo& table);
   BPlusTree* FindIndex(const TableInfo& table, size_t column);
-  Status MaintainIndexes(const TableInfo& table, RID rid,
-                         const Tuple* before, const Tuple* after);
+  Status MaintainIndexes(const TableInfo& table, RID rid, const Tuple* before,
+                         const Tuple* after);
 
   Config config_;
   // Declaration order is construction order; destruction runs in reverse, so

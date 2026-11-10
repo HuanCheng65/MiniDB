@@ -12,10 +12,11 @@ using extent_id_t = uint32_t;  // extent number
 using segment_id_t = uint32_t;
 using slot_id_t = uint16_t;
 using txn_id_t = uint64_t;
-using lsn_t = uint64_t;        // byte offset in the log file
+using lsn_t = uint64_t;  // byte offset in the log file
 
 constexpr page_id_t kInvalidPageId = std::numeric_limits<page_id_t>::max();
-constexpr extent_id_t kInvalidExtentId = std::numeric_limits<extent_id_t>::max();
+constexpr extent_id_t kInvalidExtentId =
+    std::numeric_limits<extent_id_t>::max();
 constexpr lsn_t kInvalidLsn = 0;
 constexpr uint32_t kPageSize = 8192;
 constexpr uint32_t kPagesPerExtent = 64;  // 512 KB extents

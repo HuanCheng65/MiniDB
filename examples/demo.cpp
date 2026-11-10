@@ -65,8 +65,7 @@ void PrintQuery(mydb_db* db, const std::string& sql) {
       const char* text = mydb_column_text(stmt, i);
       row.emplace_back(text != nullptr ? text : "NULL");
       widths[static_cast<size_t>(i)] =
-          std::max(widths[static_cast<size_t>(i)],
-                   row.back().size());
+          std::max(widths[static_cast<size_t>(i)], row.back().size());
     }
     rows.push_back(std::move(row));
   }
@@ -79,9 +78,9 @@ void PrintQuery(mydb_db* db, const std::string& sql) {
       const std::string& cell = row[static_cast<size_t>(i)];
       std::printf("%s%s", i == 0 ? "" : " | ", cell.c_str());
       if (i + 1 < columns) {
-        std::printf("%s", std::string(widths[static_cast<size_t>(i)] -
-                                      cell.size(), ' ')
-                              .c_str());
+        std::printf(
+            "%s", std::string(widths[static_cast<size_t>(i)] - cell.size(), ' ')
+                      .c_str());
       }
     }
     std::printf("\n");
@@ -172,8 +171,7 @@ int main(int argc, char** argv) {
   PrintQuery(db,
              "SELECT s_suppkey, s_name, s_acctbal FROM supplier "
              "WHERE s_nationkey = 0;");
-  PrintQuery(db,
-             "SELECT o_orderkey, o_totalprice, o_orderdate FROM orders;");
+  PrintQuery(db, "SELECT o_orderkey, o_totalprice, o_orderdate FROM orders;");
 
   std::printf("\n== 4. DELETE with and without WHERE ==\n");
   ExecOrDie(db, "DELETE FROM nation WHERE n_nationkey = 0;");

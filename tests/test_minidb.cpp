@@ -1,5 +1,7 @@
 // Integration tests for the embedded MiniDB API. No external test framework is
 // required (design doc 2.2 keeps dependencies self-contained).
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -8,7 +10,6 @@
 #include <sstream>
 #include <string>
 #include <vector>
-#include <unistd.h>
 
 #include "minidb/minidb.h"
 
@@ -97,9 +98,9 @@ std::string BuildBulkInsert(int start, int count) {
 }  // namespace
 
 int main() {
-  const std::string db_path =
-      "/tmp/minidb_test_" + std::to_string(static_cast<long long>(getpid())) +
-      "_db";
+  const std::string db_path = "/tmp/minidb_test_" +
+                              std::to_string(static_cast<long long>(getpid())) +
+                              "_db";
   std::error_code ec;
   std::filesystem::remove_all(db_path, ec);
 
@@ -146,8 +147,9 @@ int main() {
   CHECK(!system_columns.empty());
 
   // System relations are read-only.
-  CHECK(Exec(db, "INSERT INTO sys_tables VALUES (99, 'x', 'x', 'x', 0, 1, 0);") ==
-        false);
+  CHECK(
+      Exec(db, "INSERT INTO sys_tables VALUES (99, 'x', 'x', 'x', 0, 1, 0);") ==
+      false);
   CHECK(Exec(db, "DROP TABLE sys_tables;") == false);
   CHECK(Exec(db, "DELETE FROM sys_tables;") == false);
   CHECK(Exec(db, "CREATE TABLE sys_forbidden (id INTEGER);") == false);
@@ -155,8 +157,8 @@ int main() {
   auto columns = Query(db, "DESCRIBE lineitem;");
   CHECK(columns.size() == 16);
 
-  auto decimal_column = Query(
-      db, "SELECT l_quantity FROM lineitem WHERE l_orderkey = 0;");
+  auto decimal_column =
+      Query(db, "SELECT l_quantity FROM lineitem WHERE l_orderkey = 0;");
   CHECK(decimal_column.empty());  // empty table, but the query must plan
 
   // 2. DML with several types, WHERE filtering, FLOAT and DATE round trips.
@@ -179,7 +181,8 @@ int main() {
   CHECK(filtered.size() == 3);
   CHECK(Contains(filtered, "ARGENTINA"));
 
-  auto supplier = Query(db, "SELECT s_acctbal FROM supplier WHERE s_suppkey = 7;");
+  auto supplier =
+      Query(db, "SELECT s_acctbal FROM supplier WHERE s_suppkey = 7;");
   CHECK(supplier.size() == 1);
   if (!supplier.empty()) CHECK(supplier[0][0] == "5755.94");
 
@@ -190,20 +193,25 @@ int main() {
     CHECK(order[0][1] == "173665.47");
   }
 
-  auto not_null = Query(db, "SELECT n_comment FROM nation WHERE n_nationkey = 3;");
+  auto not_null =
+      Query(db, "SELECT n_comment FROM nation WHERE n_nationkey = 3;");
   CHECK(not_null.size() == 1);
   if (!not_null.empty()) CHECK(not_null[0][0] == "north america");
 
   // Trailing spaces in VARCHAR data are kept (dbgen comments end with one);
   // comparisons ignore them (PAD SPACE), so CHAR columns match literals.
-  CHECK(Exec(db, "INSERT INTO region VALUES (9, 'TEST', 'ends with a space ');"));
-  auto spaced = Query(db, "SELECT r_comment FROM region WHERE r_name = 'TEST  ';");
+  CHECK(
+      Exec(db, "INSERT INTO region VALUES (9, 'TEST', 'ends with a space ');"));
+  auto spaced =
+      Query(db, "SELECT r_comment FROM region WHERE r_name = 'TEST  ';");
   CHECK(spaced.size() == 1 && spaced[0][0] == "ends with a space ");
   CHECK(Exec(db, "DELETE FROM region WHERE r_regionkey = 9;"));
 
   // DECIMAL is not in the handout schema but stays supported.
-  CHECK(Exec(db, "CREATE TABLE money (id INTEGER NOT NULL, amount DECIMAL(15,2));"));
-  CHECK(Exec(db, "INSERT INTO money VALUES (1, 123.45), (2, -0.05), (3, NULL);"));
+  CHECK(Exec(
+      db, "CREATE TABLE money (id INTEGER NOT NULL, amount DECIMAL(15,2));"));
+  CHECK(
+      Exec(db, "INSERT INTO money VALUES (1, 123.45), (2, -0.05), (3, NULL);"));
   auto money = Query(db, "SELECT amount FROM money WHERE amount < 100;");
   CHECK(money.size() == 1 && money[0][0] == "-0.05");
   CHECK(Exec(db, "DROP TABLE money;"));
@@ -220,8 +228,9 @@ int main() {
   const std::string long_comment(150, 'c');
   CHECK(Exec(db, "UPDATE nation SET n_comment = '" + long_comment +
                      "', n_regionkey = 4 WHERE n_nationkey = 1;"));
-  auto updated = Query(db, "SELECT n_comment, n_regionkey FROM nation "
-                           "WHERE n_nationkey = 1;");
+  auto updated = Query(db,
+                       "SELECT n_comment, n_regionkey FROM nation "
+                       "WHERE n_nationkey = 1;");
   CHECK(updated.size() == 1);
   if (!updated.empty()) {
     CHECK(updated[0][0] == long_comment);
@@ -272,8 +281,9 @@ int main() {
   }
   CHECK(Exec(db, "COPY supplier FROM '" + tbl_path + "';"));
   CHECK(mydb_changes(db) == 1000);
-  auto copied = Query(db, "SELECT s_name, s_acctbal FROM supplier "
-                          "WHERE s_suppkey = 1099;");
+  auto copied = Query(db,
+                      "SELECT s_name, s_acctbal FROM supplier "
+                      "WHERE s_suppkey = 1099;");
   CHECK(copied.size() == 1);
   if (!copied.empty()) {
     CHECK(copied[0][0] == "Supplier#1099");
@@ -298,8 +308,8 @@ int main() {
   auto with_rid = Query(db, "SELECT rid, id FROM bulk WHERE id = 7;");
   CHECK(with_rid.size() == 1);
   if (!with_rid.empty()) {
-    auto by_rid = Query(db, "SELECT rid, * FROM bulk WHERE rid = '" +
-                                with_rid[0][0] + "';");
+    auto by_rid = Query(
+        db, "SELECT rid, * FROM bulk WHERE rid = '" + with_rid[0][0] + "';");
     CHECK(by_rid.size() == 1);
     if (!by_rid.empty()) {
       CHECK(by_rid[0].size() == 3);

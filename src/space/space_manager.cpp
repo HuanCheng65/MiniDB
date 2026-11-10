@@ -43,9 +43,9 @@ Result<extent_id_t> SpaceManager::AllocateExtent(Transaction* /*txn*/) {
     if (!persist.ok()) return persist;
   }
 
-  MINIDB_LOG_DEBUG("SPACE") << "file=" << disk_->name()
-                            << " ALLOC extent=" << extent
-                            << " file_extents=" << disk_->header().file_extents;
+  MINIDB_LOG_DEBUG("SPACE")
+      << "file=" << disk_->name() << " ALLOC extent=" << extent
+      << " file_extents=" << disk_->header().file_extents;
   return extent;
 }
 
@@ -70,8 +70,8 @@ Status SpaceManager::FreeExtent(Transaction* /*txn*/, extent_id_t extent) {
   SetBit(bitmap, extent, false);
   const size_t hint = ReadU32(page, kBitmapAllocHintOffset);
   if (extent < hint) WriteU32(page, kBitmapAllocHintOffset, extent);
-  MINIDB_LOG_DEBUG("SPACE") << "file=" << disk_->name()
-                            << " FREE extent=" << extent;
+  MINIDB_LOG_DEBUG("SPACE")
+      << "file=" << disk_->name() << " FREE extent=" << extent;
   return Status::Ok();
 }
 

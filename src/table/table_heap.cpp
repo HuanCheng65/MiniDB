@@ -82,16 +82,19 @@ Result<RID> TableHeap::ResolveForward(RID rid, int* hops, bool* moved_in) {
   // A RID handed in by a caller must name a live data page of this table: a
   // freed page still holds its old, checksum-valid bytes on disk.
   if (!segment_->IsAllocatedDataPage(rid.page_id)) {
-    return Status(StatusCode::kNotFound,
-                  "RID " + FormatRid(rid) + " is not a data page of this table");
+    return Status(
+        StatusCode::kNotFound,
+        "RID " + FormatRid(rid) + " is not a data page of this table");
   }
   for (int i = 0; i < 2; ++i) {
-    auto guard_result = buffer_pool_.FetchRead(segment_->data_disk(), rid.page_id);
+    auto guard_result =
+        buffer_pool_.FetchRead(segment_->data_disk(), rid.page_id);
     if (!guard_result.ok()) return guard_result.status();
     ReadPageGuard guard = guard_result.TakeValue();
     const std::byte* page = guard.Data();
     if (GetPageType(page) != PageType::kHeap) {
-      return Status(StatusCode::kCorruption, "RID does not point to a heap page");
+      return Status(StatusCode::kCorruption,
+                    "RID does not point to a heap page");
     }
     HeapSlot slot;
     const Status status = HeapPage::GetSlotChecked(page, rid.slot, &slot);
@@ -111,7 +114,8 @@ Result<RID> TableHeap::ResolveForward(RID rid, int* hops, bool* moved_in) {
     if (!target.ok()) return target.status();
     rid = target.value();
   }
-  return Status(StatusCode::kCorruption, "forwarding chain longer than one hop");
+  return Status(StatusCode::kCorruption,
+                "forwarding chain longer than one hop");
 }
 
 Result<Tuple> TableHeap::Get(Transaction* /*txn*/, RID rid) {
@@ -127,7 +131,8 @@ Result<Tuple> TableHeap::Get(Transaction* /*txn*/, RID rid) {
 }
 
 Result<Tuple> TableHeap::ReadAt(RID rid) {
-  auto guard_result = buffer_pool_.FetchRead(segment_->data_disk(), rid.page_id);
+  auto guard_result =
+      buffer_pool_.FetchRead(segment_->data_disk(), rid.page_id);
   if (!guard_result.ok()) return guard_result.status();
   ReadPageGuard guard = guard_result.TakeValue();
   auto record = HeapPage::ReadRecord(guard.Data(), rid.slot);
@@ -139,7 +144,8 @@ Status TableHeap::DeleteAt(Transaction* txn, RID rid) {
   uint32_t free_space = 0;
   bool empty = false;
   {
-    auto guard_result = buffer_pool_.FetchWrite(segment_->data_disk(), rid.page_id);
+    auto guard_result =
+        buffer_pool_.FetchWrite(segment_->data_disk(), rid.page_id);
     if (!guard_result.ok()) return guard_result.status();
     WritePageGuard guard = guard_result.TakeValue();
     std::byte* page = guard.MutableData();
@@ -197,11 +203,13 @@ Result<RID> TableHeap::Update(Transaction* txn, RID rid, const Tuple& tuple) {
   bool done = false;
   uint32_t free_space = 0;
   {
-    auto guard_result = buffer_pool_.FetchWrite(segment_->data_disk(), target.page_id);
+    auto guard_result =
+        buffer_pool_.FetchWrite(segment_->data_disk(), target.page_id);
     if (!guard_result.ok()) return guard_result.status();
     WritePageGuard guard = guard_result.TakeValue();
     std::byte* page = guard.MutableData();
-    const Status status = HeapPage::Replace(page, target.slot, record.data(), length);
+    const Status status =
+        HeapPage::Replace(page, target.slot, record.data(), length);
     if (status.ok()) {
       free_space = HeapPage::FreeSpace(page);
       done = true;
@@ -229,7 +237,8 @@ Result<RID> TableHeap::Update(Transaction* txn, RID rid, const Tuple& tuple) {
     if (!deleted.ok()) return deleted;
   }
   {
-    auto guard_result = buffer_pool_.FetchWrite(segment_->data_disk(), rid.page_id);
+    auto guard_result =
+        buffer_pool_.FetchWrite(segment_->data_disk(), rid.page_id);
     if (!guard_result.ok()) return guard_result.status();
     WritePageGuard guard = guard_result.TakeValue();
     std::byte* page = guard.MutableData();
@@ -264,8 +273,7 @@ bool TableHeap::Iterator::Next(RID* rid, Tuple* tuple) {
     const page_id_t page_id = pages_[page_index_];
     if (!guard_.has_value() || cached_page_ != page_id) {
       Reset();
-      auto guard_result =
-          heap_->buffer_pool_.FetchRead(heap_->disk(), page_id);
+      auto guard_result = heap_->buffer_pool_.FetchRead(heap_->disk(), page_id);
       if (!guard_result.ok()) {
         status_ = guard_result.status();
         return false;

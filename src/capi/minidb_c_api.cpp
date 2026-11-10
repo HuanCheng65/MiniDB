@@ -1,5 +1,3 @@
-#include "minidb/minidb.h"
-
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -10,6 +8,7 @@
 #include <vector>
 
 #include "db/database.h"
+#include "minidb/minidb.h"
 
 using minidb::Config;
 using minidb::Database;
@@ -79,8 +78,7 @@ const Value* CurrentValue(const mydb_stmt* stmt, int column) {
       static_cast<size_t>(column) >= stmt->result->columns.size()) {
     return nullptr;
   }
-  return &stmt->result->rows[stmt->current_row]
-              [static_cast<size_t>(column)];
+  return &stmt->result->rows[stmt->current_row][static_cast<size_t>(column)];
 }
 
 void FormatCurrentRow(mydb_stmt* stmt) {
@@ -246,8 +244,7 @@ int mydb_column_type(mydb_stmt* stmt, int column) {
       static_cast<size_t>(column) >= stmt->result->columns.size()) {
     return MYDB_TYPE_NULL;
   }
-  return TypeForColumn(
-      stmt->result->columns[static_cast<size_t>(column)].type);
+  return TypeForColumn(stmt->result->columns[static_cast<size_t>(column)].type);
 }
 
 long long mydb_column_int64(mydb_stmt* stmt, int column) {

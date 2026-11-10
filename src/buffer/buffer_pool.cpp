@@ -87,7 +87,9 @@ void ReadPageGuard::Release() {
   pool_ = nullptr;
 }
 
-const std::byte* ReadPageGuard::Data() const { return pool_->FrameData(frame_); }
+const std::byte* ReadPageGuard::Data() const {
+  return pool_->FrameData(frame_);
+}
 
 page_id_t ReadPageGuard::PageId() const { return pool_->FramePageId(frame_); }
 
@@ -135,7 +137,8 @@ page_id_t WritePageGuard::PageId() const { return pool_->FramePageId(frame_); }
 
 // -------------------------------------------------------------- BufferPool
 
-BufferPool::BufferPool(LogManager& log, const BufferConfig& config) : log_(log) {
+BufferPool::BufferPool(LogManager& log, const BufferConfig& config)
+    : log_(log) {
   const uint32_t frame_count = config.frames == 0 ? 1 : config.frames;
   frames_.reserve(frame_count);
   for (uint32_t i = 0; i < frame_count; ++i) {
@@ -149,8 +152,7 @@ BufferPool::BufferPool(LogManager& log, const BufferConfig& config) : log_(log) 
   replacer_ = std::make_unique<ClockReplacer>(frame_count);
 }
 
-void BufferPool::RegisterFileLocked(
-    const std::shared_ptr<DiskManager>& disk) {
+void BufferPool::RegisterFileLocked(const std::shared_ptr<DiskManager>& disk) {
   if (disk == nullptr) return;
   files_[disk->file_id()] = disk;
 }
@@ -169,7 +171,8 @@ Result<frame_id_t> BufferPool::TakeFreeFrameLocked() {
   const frame_id_t frame = *victim;
   Frame& victim_frame = *frames_[frame];
   MINIDB_LOG_DEBUG("BUF") << "EVICT frame=" << frame << " file="
-                          << (victim_frame.disk ? victim_frame.disk->name() : "-")
+                          << (victim_frame.disk ? victim_frame.disk->name()
+                                                : "-")
                           << " pid=" << victim_frame.page_id
                           << " dirty=" << (victim_frame.dirty ? 1 : 0);
   if (victim_frame.dirty) {
@@ -223,8 +226,8 @@ Result<frame_id_t> BufferPool::AcquireFrameLocked(
     replacer_->SetEvictable(frame_id, false);
     replacer_->RecordAccess(frame_id);
     ++stats_.miss;
-    MINIDB_LOG_DEBUG("BUF") << "MISS file=" << disk->name() << " pid=" << page_id
-                            << " -> frame=" << frame_id;
+    MINIDB_LOG_DEBUG("BUF") << "MISS file=" << disk->name()
+                            << " pid=" << page_id << " -> frame=" << frame_id;
 
     if (read_from_disk) {
       const Status status = disk->ReadPage(page_id, frame->data);
@@ -254,9 +257,9 @@ Result<ReadPageGuard> BufferPool::FetchRead(
     if (!result.ok()) return result.status();
     frame_id = result.value();
   }
-  return ReadPageGuard(this, frame_id,
-                       std::shared_lock<std::shared_mutex>(
-                           frames_[frame_id]->latch));
+  return ReadPageGuard(
+      this, frame_id,
+      std::shared_lock<std::shared_mutex>(frames_[frame_id]->latch));
 }
 
 Result<WritePageGuard> BufferPool::FetchWrite(
@@ -268,9 +271,9 @@ Result<WritePageGuard> BufferPool::FetchWrite(
     if (!result.ok()) return result.status();
     frame_id = result.value();
   }
-  return WritePageGuard(this, frame_id,
-                        std::unique_lock<std::shared_mutex>(
-                            frames_[frame_id]->latch));
+  return WritePageGuard(
+      this, frame_id,
+      std::unique_lock<std::shared_mutex>(frames_[frame_id]->latch));
 }
 
 Result<WritePageGuard> BufferPool::NewPage(
@@ -288,9 +291,8 @@ Result<WritePageGuard> BufferPool::NewPage(
       frame_id = found->second;
       Frame& frame = *frames_[frame_id];
       if (frame.pin_count != 0) {
-        return Status(StatusCode::kNoSpace,
-                      "cannot reinitialize pinned page " +
-                          std::to_string(page_id));
+        return Status(StatusCode::kNoSpace, "cannot reinitialize pinned page " +
+                                                std::to_string(page_id));
       }
       page_table_.erase(found);
       replacer_->Remove(frame_id);
@@ -321,14 +323,14 @@ Result<WritePageGuard> BufferPool::NewPage(
       replacer_->SetEvictable(frame_id, false);
       replacer_->RecordAccess(frame_id);
       ++stats_.new_page;  // not a miss: nothing is read from disk
-      MINIDB_LOG_DEBUG("BUF") << "NEW file=" << disk->name() << " pid=" << page_id
-                              << " type=" << static_cast<int>(type)
-                              << " -> frame=" << frame_id;
+      MINIDB_LOG_DEBUG("BUF")
+          << "NEW file=" << disk->name() << " pid=" << page_id
+          << " type=" << static_cast<int>(type) << " -> frame=" << frame_id;
     }
   }
-  return WritePageGuard(this, frame_id,
-                        std::unique_lock<std::shared_mutex>(
-                            frames_[frame_id]->latch));
+  return WritePageGuard(
+      this, frame_id,
+      std::unique_lock<std::shared_mutex>(frames_[frame_id]->latch));
 }
 
 Status BufferPool::WriteBackLocked(frame_id_t frame_id) {

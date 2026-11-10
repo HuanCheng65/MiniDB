@@ -69,7 +69,8 @@ std::vector<std::pair<int, size_t>> ScanAll(TableHeap& heap,
   RID rid;
   Tuple tuple;
   while (iterator.Next(&rid, &tuple)) {
-    auto values = Tuple::Decode(heap.schema(), tuple.data().data(), tuple.size());
+    auto values =
+        Tuple::Decode(heap.schema(), tuple.data().data(), tuple.size());
     CHECK(values.ok());
     if (!values.ok()) continue;
     rows.emplace_back(values.value()[0].int32_value,
@@ -82,7 +83,8 @@ std::vector<std::pair<int, size_t>> ScanAll(TableHeap& heap,
 
 // Owns the pieces Database normally wires together.
 struct Env {
-  explicit Env(const std::string& dir, uint32_t frames = 64, bool create = true) {
+  explicit Env(const std::string& dir, uint32_t frames = 64,
+               bool create = true) {
     BufferConfig config;
     config.frames = frames;
     pool = std::make_unique<BufferPool>(log, config);
@@ -149,7 +151,8 @@ void TestFormatDouble() {
 void TestSchemaOverflow() {
   std::vector<Column> columns;
   for (int i = 0; i < 9; ++i) {
-    columns.push_back(Column{"c" + std::to_string(i), TypeId::kChar, 8000, 0, true});
+    columns.push_back(
+        Column{"c" + std::to_string(i), TypeId::kChar, 8000, 0, true});
   }
   CHECK(!Schema::Make(columns).ok());  // 72000 bytes used to wrap to 6464
 }
@@ -160,7 +163,8 @@ void TestForwarding() {
   const Schema& schema = heap.schema();
   Transaction txn(1);
   std::vector<RID> rids;
-  for (int i = 0; i < 40; ++i) rids.push_back(heap.Insert(&txn, Row(schema, i, 200)).value());
+  for (int i = 0; i < 40; ++i)
+    rids.push_back(heap.Insert(&txn, Row(schema, i, 200)).value());
 
   // Grow beyond what the page can hold: the row moves and rid forwards.
   CHECK(heap.Update(&txn, rids[0], Row(schema, 0, 3000)).ok());
@@ -209,8 +213,10 @@ void TestGrowInPage() {
   CHECK(!IsForward(env, heap, a));
   auto got = heap.Get(&txn, a);
   CHECK(got.ok());
-  auto values = Tuple::Decode(schema, got.value().data().data(), got.value().size());
-  CHECK(values.ok() && values.value()[1].string_value == std::string(2000, 'z'));
+  auto values =
+      Tuple::Decode(schema, got.value().data().data(), got.value().size());
+  CHECK(values.ok() &&
+        values.value()[1].string_value == std::string(2000, 'z'));
   auto other = heap.Get(&txn, b);
   CHECK(other.ok());
 }
@@ -221,7 +227,8 @@ void TestFsmFindsEarlierPages() {
   const Schema& schema = heap.schema();
   Transaction txn(1);
   std::vector<RID> rids;
-  for (int i = 0; i < 400; ++i) rids.push_back(heap.Insert(&txn, Row(schema, i, 1000)).value());
+  for (int i = 0; i < 400; ++i)
+    rids.push_back(heap.Insert(&txn, Row(schema, i, 1000)).value());
   const page_id_t early_page = rids[8].page_id;  // not the kept first page
   CHECK(heap.Delete(&txn, rids[8]).ok());
   // Move the search hint to the end of the table without emptying that page.
@@ -245,7 +252,8 @@ void TestExtentHoleReuse() {
   Transaction txn(1);
   // ~2 rows per page -> a few hundred pages -> several extents.
   std::vector<RID> rids;
-  for (int i = 0; i < 600; ++i) rids.push_back(heap.Insert(&txn, Row(schema, i, 3500)).value());
+  for (int i = 0; i < 600; ++i)
+    rids.push_back(heap.Insert(&txn, Row(schema, i, 3500)).value());
   const size_t slots = heap.segment().extent_slots();
   CHECK(slots >= 4);
   const size_t extents = heap.segment().extent_count();
@@ -278,12 +286,14 @@ void TestReopenAndZeroFsmPage() {
     TableHeap& heap = env.Create("t");
     Transaction txn(1);
     std::vector<RID> rids;
-    for (int i = 0; i < 100; ++i) rids.push_back(heap.Insert(&txn, Row(heap.schema(), i, 300)).value());
+    for (int i = 0; i < 100; ++i)
+      rids.push_back(heap.Insert(&txn, Row(heap.schema(), i, 300)).value());
     CHECK(heap.Update(&txn, rids[3], Row(heap.schema(), 3, 3800)).ok());
   }
   // Simulate an FSM page that was never flushed (e.g. after kill -9).
   {
-    std::fstream fsm(dir + "/t.fsm", std::ios::in | std::ios::out | std::ios::binary);
+    std::fstream fsm(dir + "/t.fsm",
+                     std::ios::in | std::ios::out | std::ios::binary);
     CHECK(fsm.good());
     const std::vector<char> zeros(kPageSize, 0);
     fsm.seekp(static_cast<std::streamoff>(kPageSize));
@@ -310,7 +320,8 @@ void TestBufferPoolStats() {
   CHECK(env.pool->Stats().evict == evicted);
   // A tiny pool still works end to end with heavy eviction.
   Transaction txn(1);
-  for (int i = 0; i < 300; ++i) CHECK(heap.Insert(&txn, Row(heap.schema(), i, 500)).ok());
+  for (int i = 0; i < 300; ++i)
+    CHECK(heap.Insert(&txn, Row(heap.schema(), i, 500)).ok());
   CHECK(ScanAll(heap).size() == 300);
   CHECK(env.pool->Stats().evict > 0);
 }

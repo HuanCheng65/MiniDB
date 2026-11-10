@@ -69,8 +69,7 @@ uint32_t NextFileId() {
 }  // namespace
 
 Result<DiskManager::Ptr> DiskManager::Create(const std::string& path,
-                                             FileKind kind,
-                                             uint32_t table_id) {
+                                             FileKind kind, uint32_t table_id) {
   return CreateInternal(path, kind, table_id, /*exclusive=*/true);
 }
 
@@ -111,8 +110,8 @@ Result<DiskManager::Ptr> DiskManager::Open(const std::string& path,
   return OpenInternal(path, expected_kind);
 }
 
-Result<DiskManager::Ptr> DiskManager::OpenInternal(
-    const std::string& path, FileKind expected_kind) {
+Result<DiskManager::Ptr> DiskManager::OpenInternal(const std::string& path,
+                                                   FileKind expected_kind) {
   const int fd = ::open(path.c_str(), O_RDWR);
   if (fd < 0) {
     return Status(StatusCode::kIoError,
@@ -146,8 +145,7 @@ DiskManager::~DiskManager() {
 }
 
 Status DiskManager::InitializeNew(FileKind kind, uint32_t table_id) {
-  const uint64_t size =
-      static_cast<uint64_t>(kPagesPerExtent) * kPageSize;
+  const uint64_t size = static_cast<uint64_t>(kPagesPerExtent) * kPageSize;
   Status status = GrowFile(fd_, 0, size);
   if (!status.ok()) return status;
 
@@ -244,9 +242,9 @@ Status DiskManager::WritePage(page_id_t page_id, const std::byte* data) {
   std::lock_guard<std::mutex> lock(mutex_);
   const ssize_t n = ::pwrite(fd_, out.data(), kPageSize, PageOffset(page_id));
   if (n != static_cast<ssize_t>(kPageSize)) {
-    return Status(StatusCode::kIoError,
-                  "short write of page " + std::to_string(page_id) + ": " +
-                      std::strerror(errno));
+    return Status(StatusCode::kIoError, "short write of page " +
+                                            std::to_string(page_id) + ": " +
+                                            std::strerror(errno));
   }
   return Status::Ok();
 }
@@ -267,8 +265,8 @@ Status DiskManager::ExtendTo(uint32_t extents) {
 Status DiskManager::Sync() {
   std::lock_guard<std::mutex> lock(mutex_);
   if (::fsync(fd_) != 0) {
-    return Status(StatusCode::kIoError, "fsync failed: " +
-                                            std::string(std::strerror(errno)));
+    return Status(StatusCode::kIoError,
+                  "fsync failed: " + std::string(std::strerror(errno)));
   }
   return Status::Ok();
 }

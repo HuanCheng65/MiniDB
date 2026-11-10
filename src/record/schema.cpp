@@ -9,9 +9,7 @@ constexpr uint16_t kRecordHeaderSize = 18;
 
 }  // namespace
 
-bool Schema::IsFixedType(TypeId type) {
-  return type != TypeId::kVarchar;
-}
+bool Schema::IsFixedType(TypeId type) { return type != TypeId::kVarchar; }
 
 uint16_t Schema::FixedTypeSize(TypeId type, uint16_t length) {
   switch (type) {
@@ -66,14 +64,14 @@ Status Schema::BuildLayout() {
         break;
       case TypeId::kDecimal:
         if (column.length < 1 || column.length > 18) {
-          return Status(StatusCode::kInvalidArgument,
-                        "DECIMAL precision must be in 1..18 for column " +
-                            column.name);
+          return Status(
+              StatusCode::kInvalidArgument,
+              "DECIMAL precision must be in 1..18 for column " + column.name);
         }
         if (column.scale > column.length) {
-          return Status(StatusCode::kInvalidArgument,
-                        "DECIMAL scale exceeds precision for column " +
-                            column.name);
+          return Status(
+              StatusCode::kInvalidArgument,
+              "DECIMAL scale exceeds precision for column " + column.name);
         }
         break;
       case TypeId::kChar:

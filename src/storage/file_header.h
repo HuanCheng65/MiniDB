@@ -13,13 +13,12 @@
 namespace minidb {
 
 enum class FileKind : uint32_t {
-  kData = 1,  // relation data: page 1 is the extent bitmap
-  kIndex = 3, // B+ tree: page 1 metadata, pages 2..N nodes/free list
-  kFsm = 2,   // free-space map: pages 1..N hold FSM entries
+  kData = 1,   // relation data: page 1 is the extent bitmap
+  kIndex = 3,  // B+ tree: page 1 metadata, pages 2..N nodes/free list
+  kFsm = 2,    // free-space map: pages 1..N hold FSM entries
 };
 
-constexpr char kFileMagic[8] = {'M', 'I', 'N', 'I', 'D',
-                                'B', 'F', '2'};
+constexpr char kFileMagic[8] = {'M', 'I', 'N', 'I', 'D', 'B', 'F', '2'};
 
 struct FileHeader {
   char magic[8] = {'M', 'I', 'N', 'I', 'D', 'B', 'F', '2'};

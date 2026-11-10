@@ -193,8 +193,7 @@ class Parser {
   }
   bool AtEnd() const { return Peek().type == TokenType::kEnd; }
   bool IsKeyword(const Token& token, std::string_view keyword) const {
-    return token.type == TokenType::kIdentifier &&
-           Upper(token.text) == keyword;
+    return token.type == TokenType::kIdentifier && Upper(token.text) == keyword;
   }
   bool MatchKeyword(std::string_view keyword) {
     if (IsKeyword(Peek(), keyword)) {
@@ -325,8 +324,8 @@ bool Parser::ParseCreateTable(Statement* statement) {
       statement->if_not_exists = true;
     }
     return ExpectIdentifier(&statement->index_name) && ExpectKeyword("ON") &&
-        ExpectIdentifier(&statement->table_name) && ExpectSymbol("(") &&
-        ExpectIdentifier(&statement->index_column) && ExpectSymbol(")");
+           ExpectIdentifier(&statement->table_name) && ExpectSymbol("(") &&
+           ExpectIdentifier(&statement->index_column) && ExpectSymbol(")");
   }
   if (!ExpectKeyword("TABLE")) return Fail("expected TABLE or INDEX");
   statement->type = StatementType::kCreateTable;
@@ -651,10 +650,9 @@ bool Parser::ParseSelect(Statement* statement) {
   }
   if (!ExpectKeyword("FROM")) return false;
   if (!ExpectIdentifier(&statement->table_name)) return false;
-  if (!ParseWhereClause(&statement->select.where_column,
-                        &statement->select.where_op,
-                        &statement->select.where_value,
-                        &statement->select.has_where)) {
+  if (!ParseWhereClause(
+          &statement->select.where_column, &statement->select.where_op,
+          &statement->select.where_value, &statement->select.has_where)) {
     return false;
   }
   if (MatchKeyword("LIMIT")) {
@@ -671,10 +669,9 @@ bool Parser::ParseDelete(Statement* statement) {
   if (!ExpectKeyword("FROM")) return false;
   statement->type = StatementType::kDelete;
   if (!ExpectIdentifier(&statement->table_name)) return false;
-  return ParseWhereClause(&statement->delete_spec.where_column,
-                          &statement->delete_spec.where_op,
-                          &statement->delete_spec.where_value,
-                          &statement->delete_spec.has_where);
+  return ParseWhereClause(
+      &statement->delete_spec.where_column, &statement->delete_spec.where_op,
+      &statement->delete_spec.where_value, &statement->delete_spec.has_where);
 }
 
 bool Parser::ParseUpdate(Statement* statement) {
@@ -690,10 +687,9 @@ bool Parser::ParseUpdate(Statement* statement) {
     statement->update.assignments.push_back(std::move(assignment));
     if (!MatchSymbol(",")) break;
   }
-  return ParseWhereClause(&statement->update.where_column,
-                          &statement->update.where_op,
-                          &statement->update.where_value,
-                          &statement->update.has_where);
+  return ParseWhereClause(
+      &statement->update.where_column, &statement->update.where_op,
+      &statement->update.where_value, &statement->update.has_where);
 }
 
 bool Parser::ParseCopy(Statement* statement) {
@@ -701,7 +697,8 @@ bool Parser::ParseCopy(Statement* statement) {
   statement->type = StatementType::kCopy;
   if (!ExpectIdentifier(&statement->table_name)) return false;
   if (!ExpectKeyword("FROM")) return false;
-  if (Peek().type != TokenType::kString) return Fail("expected file path string");
+  if (Peek().type != TokenType::kString)
+    return Fail("expected file path string");
   statement->copy.path = Peek().text;
   ++pos_;
   if (MatchKeyword("DELIMITER")) {

@@ -39,8 +39,7 @@ class HeapPage {
     kSlotMovedIn = 0x4,
   };
 
-  static void Init(std::byte* page, page_id_t page_id,
-                   segment_id_t segment_id);
+  static void Init(std::byte* page, page_id_t page_id, segment_id_t segment_id);
 
   static uint16_t SlotCount(const std::byte* page) {
     return ReadU16(page, kSlotCountOffset);

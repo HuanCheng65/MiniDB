@@ -36,9 +36,9 @@ struct BufferStats {
 
   double HitRate() const {
     const uint64_t total = hit + miss;
-    return total == 0 ? 0.0
-                      : 100.0 * static_cast<double>(hit) /
-                            static_cast<double>(total);
+    return total == 0
+               ? 0.0
+               : 100.0 * static_cast<double>(hit) / static_cast<double>(total);
   }
 };
 
@@ -166,13 +166,11 @@ class BufferPool {
                                  page_id_t page_id, PageType type,
                                  segment_id_t segment_id);
 
-  Status FlushPage(const std::shared_ptr<DiskManager>& disk,
-                   page_id_t page_id);
+  Status FlushPage(const std::shared_ptr<DiskManager>& disk, page_id_t page_id);
   // Writes every dirty frame and fsyncs every file seen by the pool.
   Status FlushAll();
   // Forgets a freed page so stale bytes can never be observed.
-  void DiscardPage(const std::shared_ptr<DiskManager>& disk,
-                   page_id_t page_id);
+  void DiscardPage(const std::shared_ptr<DiskManager>& disk, page_id_t page_id);
   // Drops all cached pages of a file (used when a table file is deleted).
   // Fails when any page of that file is still pinned.
   Status DiscardFile(uint32_t file_id);
@@ -196,9 +194,7 @@ class BufferPool {
   void MarkDirty(frame_id_t frame);
   void RegisterFileLocked(const std::shared_ptr<DiskManager>& disk);
 
-  std::byte* FrameData(frame_id_t frame) {
-    return frames_[frame]->data;
-  }
+  std::byte* FrameData(frame_id_t frame) { return frames_[frame]->data; }
   const std::byte* FrameData(frame_id_t frame) const {
     return frames_[frame]->data;
   }

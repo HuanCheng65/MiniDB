@@ -50,7 +50,9 @@ class Schema {
   uint16_t null_bitmap_size() const { return null_bitmap_size_; }
   uint16_t fixed_offset(size_t column) const { return fixed_offsets_[column]; }
   uint16_t var_index(size_t column) const { return var_indices_[column]; }
-  uint16_t var_entry_offset(size_t column) const { return var_offsets_[column]; }
+  uint16_t var_entry_offset(size_t column) const {
+    return var_offsets_[column];
+  }
   size_t var_count() const { return var_count_; }
   uint32_t MaxRecordSize() const;
 

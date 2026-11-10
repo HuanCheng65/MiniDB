@@ -38,7 +38,8 @@ const std::shared_ptr<DiskManager>& Segment::data_disk() const {
   return space_.disk_ptr();
 }
 
-Result<std::unique_ptr<Segment>> Segment::Create(    SpaceManager& space, BufferPool& buffer_pool, LogManager& log,
+Result<std::unique_ptr<Segment>> Segment::Create(
+    SpaceManager& space, BufferPool& buffer_pool, LogManager& log,
     segment_id_t segment_id, SegmentType type, Transaction* /*txn*/,
     extent_id_t first_extent, FreeSpaceMap& fsm) {
   auto segment =
@@ -68,7 +69,8 @@ Result<std::unique_ptr<Segment>> Segment::Create(    SpaceManager& space, Buffer
   if (!fsm_status.ok()) return fsm_status;
 
   MINIDB_LOG_INFO("SPACE") << "segment " << segment_id << " created at page "
-                           << segment->header_page_ << " extent " << first_extent
+                           << segment->header_page_ << " extent "
+                           << first_extent
                            << " file=" << space.disk_ptr()->name();
   return segment;
 }
@@ -85,8 +87,7 @@ Result<std::unique_ptr<Segment>> Segment::Open(SpaceManager& space,
   uint32_t extent_slots = 0;
   uint32_t overflow_page = kInvalidPageId;
   {
-    auto guard_result =
-        buffer_pool.FetchRead(space.disk_ptr(), header_page);
+    auto guard_result = buffer_pool.FetchRead(space.disk_ptr(), header_page);
     if (!guard_result.ok()) return guard_result.status();
     ReadPageGuard guard = guard_result.TakeValue();
     const std::byte* page = guard.Data();
@@ -205,8 +206,7 @@ Result<page_id_t> Segment::AllocatePageInternal(Transaction* txn) {
   ++page_count_;
   alloc_hint_slot_ = slot;
 
-  const page_id_t page_id =
-      extents_[slot].extent_id * kPagesPerExtent + bit;
+  const page_id_t page_id = extents_[slot].extent_id * kPagesPerExtent + bit;
   const uint32_t spno = SpnoOf(page_id, slot);
   const Status fsm_status = fsm_.EnsureCapacity(spno);
   if (!fsm_status.ok()) {
@@ -222,9 +222,9 @@ Result<page_id_t> Segment::AllocatePage(Transaction* txn) {
   if (!allocation.ok()) return allocation.status();
   const Status status = Persist(txn);
   if (!status.ok()) return status;
-  MINIDB_LOG_DEBUG("SPACE") << "ALLOC file=" << space_.disk_ptr()->name()
-                            << " page=" << allocation.value()
-                            << " seg=" << segment_id_;
+  MINIDB_LOG_DEBUG("SPACE")
+      << "ALLOC file=" << space_.disk_ptr()->name()
+      << " page=" << allocation.value() << " seg=" << segment_id_;
   return allocation.value();
 }
 
@@ -373,8 +373,7 @@ void Segment::WriteMeta(std::byte* page) const {
   WriteU32(page, kOverflowPageOffset,
            overflow_pages_.empty() ? kInvalidPageId : overflow_pages_.front());
   WriteU32(page, kInsertHintOffset, insert_hint_spno_);
-  const size_t inline_count =
-      std::min(extents_.size(), kInlineExtentCapacity);
+  const size_t inline_count = std::min(extents_.size(), kInlineExtentCapacity);
   for (size_t i = 0; i < inline_count; ++i) {
     WriteExtentEntry(page, i, extents_[i]);
   }
@@ -410,10 +409,12 @@ Status Segment::Persist(Transaction* txn) {
     if (!guard_result.ok()) return guard_result.status();
     WritePageGuard guard = guard_result.TakeValue();
     std::byte* data = guard.MutableData();
-    InitPageHeader(data, PageType::kExtentList, overflow_pages_[i], segment_id_);
+    InitPageHeader(data, PageType::kExtentList, overflow_pages_[i],
+                   segment_id_);
     std::memset(data + kPageHeaderSize, 0, kPageSize - kPageHeaderSize);
-    const page_id_t next =
-        i + 1 < overflow_pages_.size() ? overflow_pages_[i + 1] : kInvalidPageId;
+    const page_id_t next = i + 1 < overflow_pages_.size()
+                               ? overflow_pages_[i + 1]
+                               : kInvalidPageId;
     WriteU32(data, kOverflowHeaderOffset, next);
     const size_t start = kInlineExtentCapacity + i * kOverflowExtentCapacity;
     const size_t count =

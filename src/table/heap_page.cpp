@@ -95,7 +95,8 @@ Result<slot_id_t> HeapPage::Insert(std::byte* page, const std::byte* record,
     live = ReadU16(page, kLiveCountOffset);
     continuous = static_cast<uint32_t>(upper) - lower;
     if (continuous < need) {
-      return Status(StatusCode::kNoSpace, "heap page has no space after compaction");
+      return Status(StatusCode::kNoSpace,
+                    "heap page has no space after compaction");
     }
   }
 
@@ -123,7 +124,8 @@ Status HeapPage::Delete(std::byte* page, slot_id_t slot) {
   uint16_t live = ReadU16(page, kLiveCountOffset);
   WriteU16(page, kFragBytesOffset,
            static_cast<uint16_t>(frag + current.length));
-  if (live > 0) WriteU16(page, kLiveCountOffset, static_cast<uint16_t>(live - 1));
+  if (live > 0)
+    WriteU16(page, kLiveCountOffset, static_cast<uint16_t>(live - 1));
   WriteSlot(page, slot, HeapSlot{});
   return Status::Ok();
 }
@@ -136,7 +138,8 @@ Status HeapPage::UpdateInPlace(std::byte* page, slot_id_t slot,
   if (current.forward()) {
     return Status(StatusCode::kInvalidArgument, "cannot update a forward slot");
   }
-  if (length > current.length) return Status(StatusCode::kNoSpace, "record grew");
+  if (length > current.length)
+    return Status(StatusCode::kNoSpace, "record grew");
   std::memcpy(page + current.offset, record, length);
   uint16_t frag = ReadU16(page, kFragBytesOffset);
   WriteU16(page, kFragBytesOffset,
@@ -155,7 +158,8 @@ Status HeapPage::Replace(std::byte* page, slot_id_t slot,
   const Status status = GetSlotChecked(page, slot, &current);
   if (!status.ok()) return status;
   if (current.forward()) {
-    return Status(StatusCode::kInvalidArgument, "cannot replace a forward slot");
+    return Status(StatusCode::kInvalidArgument,
+                  "cannot replace a forward slot");
   }
   if (length <= current.length) {
     return UpdateInPlace(page, slot, record, length);
@@ -166,7 +170,8 @@ Status HeapPage::Replace(std::byte* page, slot_id_t slot,
 
   // Release the old bytes first so Compact() reclaims them.
   const uint16_t frag = ReadU16(page, kFragBytesOffset);
-  WriteU16(page, kFragBytesOffset, static_cast<uint16_t>(frag + current.length));
+  WriteU16(page, kFragBytesOffset,
+           static_cast<uint16_t>(frag + current.length));
   WriteSlot(page, slot, HeapSlot{});
   uint16_t lower = ReadU16(page, kFreeLowerOffset);
   uint16_t upper = ReadU16(page, kFreeUpperOffset);
@@ -219,7 +224,8 @@ Status HeapPage::SetForward(std::byte* page, slot_id_t slot, RID target) {
     return Status::Ok();
   }
   if (current.length < 6) {
-    return Status(StatusCode::kInternal, "record too small for forward pointer");
+    return Status(StatusCode::kInternal,
+                  "record too small for forward pointer");
   }
   WriteU32(page, current.offset, target.page_id);
   WriteU16(page, current.offset + 4, target.slot);

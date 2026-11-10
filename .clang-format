@@ -1,0 +1,2 @@
+# Existing code already follows Google style; this pins it for all contributors.
+BasedOnStyle: Google

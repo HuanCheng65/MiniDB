@@ -21,7 +21,8 @@ class Logger {
   bool Enabled(LogLevel level) const { return level >= level_; }
 
   void SetOutputFile(const std::string& path);
-  void Write(LogLevel level, std::string_view module, const std::string& message);
+  void Write(LogLevel level, std::string_view module,
+             const std::string& message);
 
   static LogLevel ParseLevel(std::string_view text);
   static const char* LevelName(LogLevel level);
@@ -37,7 +38,8 @@ class Logger {
 // Usage: MINIDB_LOG_DEBUG("BUF") << "value=" << v;
 class LogMessage {
  public:
-  LogMessage(LogLevel level, const char* module) : level_(level), module_(module) {}
+  LogMessage(LogLevel level, const char* module)
+      : level_(level), module_(module) {}
   ~LogMessage();
 
   std::ostream& Stream() { return stream_; }
@@ -55,11 +57,10 @@ struct LogVoidify {
 
 // A disabled level costs one comparison: the message is neither built nor
 // formatted (same trick as glog's LOG_IF). Safe inside if/else without braces.
-#define MINIDB_LOG(level, module)                         \
-  !::minidb::Logger::Instance().Enabled(level)            \
-      ? (void)0                                           \
-      : ::minidb::LogVoidify() &                          \
-            ::minidb::LogMessage(level, module).Stream()
+#define MINIDB_LOG(level, module)              \
+  !::minidb::Logger::Instance().Enabled(level) \
+      ? (void)0                                \
+      : ::minidb::LogVoidify() & ::minidb::LogMessage(level, module).Stream()
 
 #define MINIDB_LOG_DEBUG(module) MINIDB_LOG(::minidb::LogLevel::kDebug, module)
 #define MINIDB_LOG_INFO(module) MINIDB_LOG(::minidb::LogLevel::kInfo, module)

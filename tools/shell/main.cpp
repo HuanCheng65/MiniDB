@@ -28,7 +28,8 @@ struct Options {
 void PrintUsage(const char* program) {
   std::cout << "Usage: " << program << " [options]\n"
             << "  --db <path>          database folder (default: minidb_db)\n"
-            << "  --file <path>        run a script (SQL and meta commands) and exit\n"
+            << "  --file <path>        run a script (SQL and meta commands) "
+               "and exit\n"
             << "  --buffer <frames>    buffer pool frames (default: 1024)\n"
             << "  --log-level <level>  debug|info|warn|error|off\n"
             << "  --log-file <path>    also append the log to a file\n"
@@ -98,8 +99,7 @@ void PrintTable(const std::vector<std::string>& headers,
   };
   print_row(headers);
   for (size_t i = 0; i < headers.size(); ++i) {
-    std::cout << (i == 0 ? "" : "-+-")
-              << std::string(widths[i], '-');
+    std::cout << (i == 0 ? "" : "-+-") << std::string(widths[i], '-');
   }
   std::cout << "\n";
   for (const auto& row : rows) print_row(row);
@@ -118,7 +118,8 @@ bool ExecuteAndPrint(mydb_db* db, const std::string& sql) {
   std::vector<std::string> headers;
   const int column_count = mydb_column_count(stmt);
   for (int i = 0; i < column_count; ++i) {
-    headers.push_back(mydb_column_name(stmt, i) ? mydb_column_name(stmt, i) : "");
+    headers.push_back(mydb_column_name(stmt, i) ? mydb_column_name(stmt, i)
+                                                : "");
   }
   std::vector<std::vector<std::string>> rows;
   int step = 0;
@@ -201,7 +202,8 @@ void PrintHelp() {
          "  SHOW TABLES; DESCRIBE <table>;\n"
          "  COPY <table> FROM '<file>' [DELIMITER '|'];   bulk load (.tbl)\n"
          "  SELECT rid, ... / WHERE rid = 'page:slot'    record ids\n"
-         "  PRAGMA <name>[(args)] [= value];             see PRAGMA pragma_list;\n"
+         "  PRAGMA <name>[(args)] [= value];             see PRAGMA "
+         "pragma_list;\n"
          "Meta commands (no ';'; each is shorthand for the SQL shown):\n"
          "  .tables                 SHOW TABLES\n"
          "  .schema <table>         DESCRIBE <table>\n"

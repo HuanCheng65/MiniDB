@@ -43,7 +43,7 @@ class BPlusTree {
   static Result<std::unique_ptr<BPlusTree>> Create(
       BufferPool& pool, const std::string& path, const IndexMetadata& metadata);
   static Result<std::unique_ptr<BPlusTree>> Open(BufferPool& pool,
-                                                const std::string& path);
+                                                 const std::string& path);
   Status Insert(const Value& key, RID rid);
   Status Erase(const Value& key, RID rid);
   // Operators: =, <, <=, >, >=, !=, <>. Visitor can stop early (LIMIT).
@@ -66,7 +66,10 @@ class BPlusTree {
     std::vector<IndexEntry> keys;
     std::vector<page_id_t> children;
   };
-  struct Split { IndexEntry separator; page_id_t right; };
+  struct Split {
+    IndexEntry separator;
+    page_id_t right;
+  };
   BPlusTree(BufferPool& pool, DiskManager::Ptr disk, IndexMetadata metadata);
   static int Compare(const IndexEntry& a, const IndexEntry& b);
   Status CheckKey(const Value& key) const;
@@ -75,7 +78,8 @@ class BPlusTree {
   Status SaveMetadata();
   Result<page_id_t> Allocate();
   Status Free(page_id_t id);
-  Result<std::optional<Split>> InsertNode(page_id_t id, const IndexEntry& entry);
+  Result<std::optional<Split>> InsertNode(page_id_t id,
+                                          const IndexEntry& entry);
   Status EraseNode(page_id_t id, const IndexEntry& entry);
   Status Rebalance(Node* parent, size_t child);
   Result<page_id_t> FindLeaf(const IndexEntry& entry);

@@ -104,9 +104,9 @@ struct PragmaContext {
 
 // Per-page counts gathered from the slot directories of a table's heap pages.
 struct HeapPageSummary {
-  int64_t records = 0;    // user-visible rows stored on the page
-  int64_t forwards = 0;   // FORWARD slots (rows living elsewhere)
-  int64_t moved_in = 0;   // MOVED_IN copies of rows from other pages
+  int64_t records = 0;   // user-visible rows stored on the page
+  int64_t forwards = 0;  // FORWARD slots (rows living elsewhere)
+  int64_t moved_in = 0;  // MOVED_IN copies of rows from other pages
   int64_t empty_slots = 0;
   uint32_t free_bytes = 0;
 };
@@ -131,8 +131,9 @@ HeapPageSummary SummarizeHeapPage(const std::byte* page) {
 }
 
 // Calls fn(page_id, page bytes) for every allocated heap page of a table.
-Status ForEachHeapPage(BufferPool& pool, TableInfo* table,
-                       const std::function<Status(page_id_t, const std::byte*)>& fn) {
+Status ForEachHeapPage(
+    BufferPool& pool, TableInfo* table,
+    const std::function<Status(page_id_t, const std::byte*)>& fn) {
   for (page_id_t page_id : table->segment->AllocatedPages()) {
     auto guard = pool.FetchRead(table->data_disk, page_id);
     if (!guard.ok()) return guard.status();
@@ -170,8 +171,9 @@ Status BufferStatsPragma(PragmaContext& ctx) {
   ctx.result->rows.push_back(
       {Int(static_cast<int64_t>(ctx.pool.FrameCount())),
        Int(static_cast<int64_t>(frames.size())), Int(pinned), Int(dirty),
-       Int(static_cast<int64_t>(stats.hit)), Int(static_cast<int64_t>(stats.miss)),
-       Percent(stats.HitRate()), Int(static_cast<int64_t>(stats.evict)),
+       Int(static_cast<int64_t>(stats.hit)),
+       Int(static_cast<int64_t>(stats.miss)), Percent(stats.HitRate()),
+       Int(static_cast<int64_t>(stats.evict)),
        Int(static_cast<int64_t>(stats.flush)),
        Int(static_cast<int64_t>(stats.new_page))});
   return Status::Ok();
@@ -189,8 +191,9 @@ Status BufferFramesPragma(PragmaContext& ctx) {
   for (const FrameInfo& frame : ctx.pool.Frames()) {
     ctx.result->rows.push_back(
         {Int(frame.frame), Text(frame.file), Int(frame.page_id),
-         frame.page_type == PageType::kInvalid ? Value::Null()
-                                               : Text(PageTypeName(frame.page_type)),
+         frame.page_type == PageType::kInvalid
+             ? Value::Null()
+             : Text(PageTypeName(frame.page_type)),
          Int(frame.pin_count), Int(frame.dirty ? 1 : 0)});
   }
   return Status::Ok();
@@ -206,24 +209,25 @@ Status TableInfoPragma(PragmaContext& ctx) {
 
   int64_t heap_pages = 0;
   HeapPageSummary total;
-  status = ForEachHeapPage(ctx.pool, info, [&](page_id_t, const std::byte* page) {
-    const HeapPageSummary summary = SummarizeHeapPage(page);
-    ++heap_pages;
-    total.records += summary.records;
-    total.forwards += summary.forwards;
-    total.moved_in += summary.moved_in;
-    total.empty_slots += summary.empty_slots;
-    total.free_bytes += summary.free_bytes;
-    return Status::Ok();
-  });
+  status =
+      ForEachHeapPage(ctx.pool, info, [&](page_id_t, const std::byte* page) {
+        const HeapPageSummary summary = SummarizeHeapPage(page);
+        ++heap_pages;
+        total.records += summary.records;
+        total.forwards += summary.forwards;
+        total.moved_in += summary.moved_in;
+        total.empty_slots += summary.empty_slots;
+        total.free_bytes += summary.free_bytes;
+        return Status::Ok();
+      });
   if (!status.ok()) return status;
 
   const auto file_bytes = [](const DiskManager& disk) {
     return static_cast<int64_t>(disk.header().file_extents) * kPagesPerExtent *
            kPageSize;
   };
-  const double capacity =
-      static_cast<double>(heap_pages) * (kPageSize - HeapPage::kSlotArrayOffset);
+  const double capacity = static_cast<double>(heap_pages) *
+                          (kPageSize - HeapPage::kSlotArrayOffset);
   SetColumns(ctx.result, {{"table", TypeId::kVarchar},
                           {"data_file", TypeId::kVarchar},
                           {"data_bytes", TypeId::kInt64},
@@ -241,13 +245,16 @@ Status TableInfoPragma(PragmaContext& ctx) {
                           {"fill_pct", TypeId::kDouble},
                           {"fsm_pages", TypeId::kInt64}});
   ctx.result->rows.push_back(
-      {Text(info->name), Text(info->data_file), Int(file_bytes(*info->data_disk)),
-       Text(info->fsm_file), Int(file_bytes(*info->fsm_disk)),
-       Int(segment.header_page()), Int(static_cast<int64_t>(segment.extent_count())),
-       Int(static_cast<int64_t>(segment.extent_slots())), Int(segment.page_count()),
-       Int(heap_pages), Int(total.records + total.forwards), Int(total.forwards),
+      {Text(info->name), Text(info->data_file),
+       Int(file_bytes(*info->data_disk)), Text(info->fsm_file),
+       Int(file_bytes(*info->fsm_disk)), Int(segment.header_page()),
+       Int(static_cast<int64_t>(segment.extent_count())),
+       Int(static_cast<int64_t>(segment.extent_slots())),
+       Int(segment.page_count()), Int(heap_pages),
+       Int(total.records + total.forwards), Int(total.forwards),
        Int(total.empty_slots), Int(total.free_bytes),
-       Percent(capacity > 0 ? 100.0 * (1.0 - total.free_bytes / capacity) : 0.0),
+       Percent(capacity > 0 ? 100.0 * (1.0 - total.free_bytes / capacity)
+                            : 0.0),
        Int(info->fsm->page_count())});
   return Status::Ok();
 }
@@ -267,8 +274,9 @@ Status ExtentsPragma(PragmaContext& ctx) {
   for (size_t slot = 0; slot < extents.size(); ++slot) {
     const ExtentEntry& entry = extents[slot];
     if (!entry.valid()) {  // hole left by a freed extent (design doc 5.5)
-      ctx.result->rows.push_back({Int(static_cast<int64_t>(slot)), Value::Null(),
-                                  Value::Null(), Int(0), Text("(hole)")});
+      ctx.result->rows.push_back({Int(static_cast<int64_t>(slot)),
+                                  Value::Null(), Value::Null(), Int(0),
+                                  Text("(hole)")});
       continue;
     }
     const page_id_t first = entry.extent_id * kPagesPerExtent;
@@ -330,11 +338,11 @@ Status FreeSpacePragma(PragmaContext& ctx) {
   // Collect the page contents first: reading an FSM page while holding a heap
   // page latch would break the latch order of design doc 11.5.
   std::vector<std::pair<page_id_t, HeapPageSummary>> pages;
-  Status status = ForEachHeapPage(ctx.pool, info, [&](page_id_t page_id,
-                                                      const std::byte* page) {
-    pages.emplace_back(page_id, SummarizeHeapPage(page));
-    return Status::Ok();
-  });
+  Status status = ForEachHeapPage(
+      ctx.pool, info, [&](page_id_t page_id, const std::byte* page) {
+        pages.emplace_back(page_id, SummarizeHeapPage(page));
+        return Status::Ok();
+      });
   if (!status.ok()) return status;
   for (const auto& [page_id, summary] : pages) {
     auto spno = info->segment->SpnoOfPage(page_id);
@@ -393,7 +401,8 @@ Status PageHeaderPragma(PragmaContext& ctx) {
     if (!guard.ok()) return guard.status();
     const std::byte* page = guard.value().Data();
     const PageType type = GetPageType(page);
-    row = {Int(page_id.value()), Text(PageTypeName(type)), Int(GetSegmentId(page)),
+    row = {Int(page_id.value()), Text(PageTypeName(type)),
+           Int(GetSegmentId(page)),
            Int(static_cast<int64_t>(ReadU64(page, kPageLsnOffset)))};
     if (type == PageType::kHeap) {
       row.push_back(Int(HeapPage::SlotCount(page)));
@@ -437,7 +446,8 @@ Status PageSlotsPragma(PragmaContext& ctx) {
   if (GetPageType(page) != PageType::kHeap) {
     return Status(StatusCode::kInvalidArgument,
                   "page " + std::to_string(page_id.value()) + " is a " +
-                      PageTypeName(GetPageType(page)) + " page, not a heap page");
+                      PageTypeName(GetPageType(page)) +
+                      " page, not a heap page");
   }
   SetColumns(ctx.result, {{"slot", TypeId::kInt64},
                           {"offset", TypeId::kInt64},
@@ -452,10 +462,10 @@ Status PageSlotsPragma(PragmaContext& ctx) {
       auto rid = HeapPage::ReadForwardTarget(page, slot);
       if (rid.ok()) target = Text(FormatRid(rid.value()));
     }
-    ctx.result->rows.push_back(
-        {Int(slot), s.empty() ? Value::Null() : Int(s.offset),
-         s.empty() ? Value::Null() : Int(s.length), Text(SlotFlagsName(s)),
-         std::move(target)});
+    ctx.result->rows.push_back({Int(slot),
+                                s.empty() ? Value::Null() : Int(s.offset),
+                                s.empty() ? Value::Null() : Int(s.length),
+                                Text(SlotFlagsName(s)), std::move(target)});
   }
   return Status::Ok();
 }
@@ -532,9 +542,11 @@ Status PragmaList(PragmaContext& ctx) {
   SetColumns(ctx.result, {{"name", TypeId::kVarchar},
                           {"arguments", TypeId::kVarchar},
                           {"description", TypeId::kVarchar}});
-  for (const auto* name : {"indexes", "index_stats", "index_check", "index_tree", "index_dot"})
-    ctx.result->rows.push_back({Text(name), Text(name == std::string("indexes") ? "[table]" : "index"),
-                                Text("B+ tree index introspection")});
+  for (const auto* name :
+       {"indexes", "index_stats", "index_check", "index_tree", "index_dot"})
+    ctx.result->rows.push_back(
+        {Text(name), Text(name == std::string("indexes") ? "[table]" : "index"),
+         Text("B+ tree index introspection")});
   for (const PragmaEntry& entry : kPragmas) {
     ctx.result->rows.push_back(
         {Text(entry.name), Text(entry.arguments), Text(entry.description)});

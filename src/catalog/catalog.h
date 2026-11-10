@@ -42,9 +42,8 @@ struct TableInfo {
 
 class Catalog {
  public:
-  static Result<std::unique_ptr<Catalog>> Bootstrap(const std::string& directory,
-                                                    BufferPool& buffer_pool,
-                                                    LogManager& log);
+  static Result<std::unique_ptr<Catalog>> Bootstrap(
+      const std::string& directory, BufferPool& buffer_pool, LogManager& log);
   static Result<std::unique_ptr<Catalog>> Open(const std::string& directory,
                                                BufferPool& buffer_pool,
                                                LogManager& log);
