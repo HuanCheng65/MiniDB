@@ -41,8 +41,9 @@ def main(tree_path, png_path):
     ]
     for kind, page, count, text in shown:
         following = re.search(r'-> (\S+)$', text)[1]
+        first = '\\l'.join(keys(text, 2))  # no backslash in f-string braces
         out.append(f'  p{page} [label="Leaf p{page} | {count} entries\\l'
-                   f'{"\\l".join(keys(text, 2))}\\l...\\lnext: {following}\\l"];')
+                   f'{first}\\l...\\lnext: {following}\\l"];')
         out.append(f'  root -> p{page};')
     chain = [f'p{page}' for _, page, _, _ in shown]
     if len(leaves) > 4:

@@ -121,4 +121,4 @@ ctest --test-dir build --output-on-failure
 
 ## 写作时保留的实现边界
 
-当前支持单列、非唯一索引；不支持联合/唯一索引、FLOAT/DECIMAL/DATE 索引、并发写树和崩溃恢复。NULL 不入索引；字符声明长度最多 4000 字节。SELECT、UPDATE、DELETE 的 WHERE 列有索引时都用索引定位行（`!=` 除外），语句消息显示 `INDEX SCAN name`。`CREATE INDEX` 在内存中对全部索引项排序后批量建树，建树期间内存占用与表的行数成正比（orders 150 万行约 157 MB）。正常关闭/重开有完整验证，不能写成已经实现 WAL 或完整事务原子性。树图为可读性截取展示，结构校验检查的是完整树。
+当前支持单列、非唯一索引；不支持联合/唯一索引、FLOAT/DECIMAL/DATE 索引、并发写树和崩溃恢复。NULL 不入索引；字符声明长度最多 4000 字节。SELECT、UPDATE、DELETE 的 WHERE 列有索引时都用索引定位行（`!=` 除外），语句消息显示 `INDEX SCAN name`。`CREATE INDEX` 在内存中对全部索引项排序后批量建树，建树期间内存占用与表的行数成正比（实测进程峰值：orders 150 万行约 157 MB；lineitem 600 万行在 INTEGER 列上约 600 MB、CHAR(25) 列上约 794 MB，建树耗时分别为 5.2 s 和 16.5 s）。正常关闭/重开有完整验证，不能写成已经实现 WAL 或完整事务原子性。树图为可读性截取展示，结构校验检查的是完整树。

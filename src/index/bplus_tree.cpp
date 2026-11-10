@@ -206,6 +206,13 @@ class BPlusTree::Node {
     set_size(size() - 1);
   }
   void Truncate(size_t size) { set_size(size); }
+  // Whether every stored string length fits the column (StringKey clamps a
+  // bad one rather than failing, so Validate() checks them).
+  bool KeyLengthsValid() const {
+    for (size_t i = 0; tree_.string_keys_ && i < size(); ++i)
+      if (ReadU16(Slot(i), 0) > tree_.metadata_.length) return false;
+    return true;
+  }
 
  private:
   size_t slot_bytes() const {
@@ -738,6 +745,7 @@ Result<IndexStats> BPlusTree::Validate() {
     Node node(*this);
     auto status = Read(id, &node);
     if (!status.ok()) return status;
+    if (!node.KeyLengthsValid()) return Corrupt("invalid string key length");
     const std::vector<IndexEntry> keys = node.entries();
     ++stats.nodes;
     if (id != root_ && keys.size() < capacity_ / 2)
