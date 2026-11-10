@@ -3,12 +3,14 @@
 #pragma once
 
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
 #include "catalog/catalog.h"
 #include "common/status.h"
 #include "log/log_manager.h"
+#include "index/bplus_tree.h"
 #include "record/value.h"
 #include "sql/parser.h"
 #include "txn/txn_manager.h"
@@ -78,6 +80,16 @@ class Database {
   Status ExecuteShowTables(QueryResult* result);
   Status ExecuteDescribe(Statement* statement, QueryResult* result);
 
+  Status LoadIndexes();
+  Status ExecuteCreateIndex(Statement*, Transaction*, QueryResult*);
+  Status ExecuteDropIndex(Statement*, QueryResult*);
+  Status ExecuteIndexPragma(Statement*, QueryResult*);
+  Status DropIndex(const std::string& name);
+  Status DropTableIndexes(const TableInfo& table);
+  BPlusTree* FindIndex(const TableInfo& table, size_t column);
+  Status MaintainIndexes(const TableInfo& table, RID rid,
+                         const Tuple* before, const Tuple* after);
+
   Config config_;
   // Declaration order is construction order; destruction runs in reverse, so
   // the catalog (and its per-relation segments/heaps) dies before the buffer
@@ -86,6 +98,7 @@ class Database {
   std::unique_ptr<BufferPool> pool_;
   std::unique_ptr<TxnManager> txns_;
   std::unique_ptr<Catalog> catalog_;
+  std::map<std::string, std::unique_ptr<BPlusTree>> indexes_;
   bool closed_ = false;
 };
 

@@ -31,6 +31,21 @@ The parser understands the real TPC-H DDL, including `CHAR(n)`, `VARCHAR(n)`,
 ignores `FOREIGN KEY` constraints. Comments (`--` and `/* ... */`) are
 supported.
 
+## Experiment 2: B+ tree indexes
+
+Persistent single-column B+ trees now support `INTEGER`, `BIGINT`, `CHAR` and
+`VARCHAR`. `CREATE INDEX ix ON t(column)` indexes existing rows; SQL writes
+maintain the tree and filtered SELECTs automatically use it. Nodes share the
+8 KB page format, checksum I/O and CLOCK buffer pool with heap storage.
+`PRAGMA indexes`, `PRAGMA index_tree(ix)` and `PRAGMA index_check(ix)` expose
+the catalog, tree diagram and structural validation. `DROP INDEX ix` removes
+an index; dropping a table removes its indexes.
+
+See [实验二设计与使用说明](doc/experiment2-index.md),
+[报告编写者交接文档](doc/experiment2-report-handoff.md), the
+[acceptance script](scripts/demo_index.txt), and `minidb_verify_index_tpch`
+for a real TPC-H supplier demonstration.
+
 ## Build
 
 ```sh
@@ -51,6 +66,8 @@ Build products:
 * `build/minidb_shell` — interactive shell / script runner
 * `build/minidb_demo` — embedded API demo
 * `build/minidb_tests` — integration tests (C API)
+* `build/minidb_index_tests` — B+ tree randomized and SQL integration tests
+* `build/minidb_verify_index_tpch` — real supplier index acceptance verifier
 * `build/minidb_storage_tests` — storage-layer tests (internal C++ API)
 * `build/minidb_verify_tpch` — checks a loaded TPC-H database row by row
   against the `.tbl` files

@@ -30,6 +30,8 @@ set(MINIDB_CORE_SOURCES
     src/table/table_heap.cpp
     src/catalog/catalog.cpp
     src/sql/parser.cpp
+    src/index/bplus_tree.cpp
+    src/db/index.cpp
     src/db/database.cpp
     src/db/pragma.cpp
     src/capi/minidb_c_api.cpp
@@ -94,7 +96,14 @@ if(MINIDB_BUILD_TESTS)
   target_link_libraries(minidb_storage_tests PRIVATE minidb_core)
   add_test(NAME minidb_storage COMMAND minidb_storage_tests)
 
+  add_executable(minidb_index_tests tests/test_index.cpp)
+  target_link_libraries(minidb_index_tests PRIVATE minidb_core)
+  add_test(NAME minidb_index COMMAND minidb_index_tests)
+
   # Manual check against real data (not a ctest: needs the TPC-H .tbl files).
+  add_executable(minidb_verify_index_tpch tests/verify_index_tpch.cpp)
+  target_link_libraries(minidb_verify_index_tpch PRIVATE minidb_core)
+
   add_executable(minidb_verify_tpch tests/verify_tpch.cpp)
   target_link_libraries(minidb_verify_tpch PRIVATE minidb_core)
 endif()

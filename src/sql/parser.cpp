@@ -318,9 +318,17 @@ bool Parser::ParseStatement(Statement* statement) {
 
 bool Parser::ParseCreateTable(Statement* statement) {
   if (!ExpectKeyword("CREATE")) return false;
-  if (!ExpectKeyword("TABLE")) {
-    return Fail("only CREATE TABLE is supported");
+  if (MatchKeyword("INDEX")) {
+    statement->type = StatementType::kCreateIndex;
+    if (MatchKeyword("IF")) {
+      if (!ExpectKeyword("NOT") || !ExpectKeyword("EXISTS")) return false;
+      statement->if_not_exists = true;
+    }
+    return ExpectIdentifier(&statement->index_name) && ExpectKeyword("ON") &&
+        ExpectIdentifier(&statement->table_name) && ExpectSymbol("(") &&
+        ExpectIdentifier(&statement->index_column) && ExpectSymbol(")");
   }
+  if (!ExpectKeyword("TABLE")) return Fail("expected TABLE or INDEX");
   statement->type = StatementType::kCreateTable;
   if (MatchKeyword("IF")) {
     if (!ExpectKeyword("NOT")) return false;
@@ -537,7 +545,15 @@ bool Parser::SkipBalancedParentheses() {
 
 bool Parser::ParseDropTable(Statement* statement) {
   if (!ExpectKeyword("DROP")) return false;
-  if (!ExpectKeyword("TABLE")) return Fail("only DROP TABLE is supported");
+  if (MatchKeyword("INDEX")) {
+    statement->type = StatementType::kDropIndex;
+    if (MatchKeyword("IF")) {
+      if (!ExpectKeyword("EXISTS")) return false;
+      statement->if_exists = true;
+    }
+    return ExpectIdentifier(&statement->index_name);
+  }
+  if (!ExpectKeyword("TABLE")) return Fail("expected TABLE or INDEX");
   statement->type = StatementType::kDropTable;
   if (MatchKeyword("IF")) {
     if (!ExpectKeyword("EXISTS")) return false;

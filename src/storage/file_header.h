@@ -14,6 +14,7 @@ namespace minidb {
 
 enum class FileKind : uint32_t {
   kData = 1,  // relation data: page 1 is the extent bitmap
+  kIndex = 3, // B+ tree: page 1 metadata, pages 2..N nodes/free list
   kFsm = 2,   // free-space map: pages 1..N hold FSM entries
 };
 
@@ -73,7 +74,8 @@ struct FileHeader {
       return Status(StatusCode::kCorruption,
                     "page/extent size mismatch in file header");
     }
-    if (header.kind() != FileKind::kData && header.kind() != FileKind::kFsm) {
+    if (header.kind() != FileKind::kData && header.kind() != FileKind::kFsm &&
+        header.kind() != FileKind::kIndex) {
       return Status(StatusCode::kCorruption, "unknown relation file kind");
     }
     if (header.file_extents == 0) {
