@@ -15,7 +15,7 @@
 | 两种数据类型 | TPC-H supplier 的 `s_suppkey INTEGER`、`s_name CHAR(25)` |
 | 图形化结构展示 | `PRAGMA index_tree(name)` 输出带分支和叶链箭头的命令行树图；`index_dot` 输出 Graphviz 图源 |
 | 模块接口与核心源码 | `src/index/bplus_tree.h/.cpp`、`src/db/index.cpp` |
-| 测试规模 | 10,000 行真实 supplier；20,000 次重开后逐条索引检索；随机测试、三层以上内部节点与最小扇出测试 |
+| 测试规模 | 1,500,000 行真实 orders 上三个索引的建立、查找和增删改；10,000 行真实 supplier；20,000 次重开后逐条索引检索；随机测试、三层以上内部节点与最小扇出测试 |
 
 ## 编译、测试、演示
 
@@ -58,7 +58,7 @@ PRAGMA buffer_stats;
 DROP INDEX supplier_name;
 ```
 
-`CREATE INDEX IF NOT EXISTS`、`DROP INDEX IF EXISTS` 可用于重复执行；`DROP TABLE` 同时删除该表的索引。没有适用索引时 SELECT 沿用全表扫描。UPDATE/DELETE 当前仍扫描 heap 定位记录，然后增量维护索引。未指定 ORDER BY 的 SQL 不保证顺序；索引路径按键、RID 顺序输出。
+`CREATE INDEX IF NOT EXISTS`、`DROP INDEX IF EXISTS` 可用于重复执行；`DROP TABLE` 同时删除该表的索引。没有适用索引时 SELECT 沿用全表扫描。UPDATE/DELETE 与 SELECT 共用同一个行定位函数（`Database::FindRows`）：WHERE 列有索引时用索引定位，否则扫描 heap；两者都先收集全部命中行再修改，然后增量维护索引。未指定 ORDER BY 的 SQL 不保证顺序；索引路径按键、RID 顺序输出。
 
 ## 文件和页面设计
 
@@ -88,7 +88,7 @@ DROP INDEX supplier_name;
 
 SQL 建索引先写 `.building` 文件，填充成功并 flush 后改名为 `.idx`，打开时只发现完成的 `.idx` 文件。索引元数据核对 table ID、列序号、类型和长度。写入维护使用 tuple 解码后的标准值，heap 转发更新仍使用稳定的原 RID。
 
-复杂度：单条插入、删除、点定位访问 `O(log_F N)` 层节点；节点内操作受固定页容量限制。范围扫描访问定位路径及匹配叶页，回表成本取决于结果数量。建索引采用逐条插入 `O(N log_F N)`，不一次性把表或树装入内存。
+复杂度：单条插入、删除、点定位访问 `O(log_F N)` 层节点；节点内操作受固定页容量限制。范围扫描访问定位路径及匹配叶页，回表成本取决于结果数量。建索引把全部 `(key, RID)` 读入内存排序（`O(N log N)`），再自底向上顺序写出各层节点；树本身不装入内存，但排序期间内存占用与行数成正比。节点在内存中保持页面的字节编码，查找在页内二分比较，插入、删除、分裂、合并都是定长槽位的移动，不把整页解码成对象。
 
 ## 结构检查和图形展示
 
@@ -107,7 +107,9 @@ SQL 建索引先写 `.building` 文件，填充成功并 flush 后改名为 `.id
 3. 2–4 帧小缓冲池、跨多个 extent、flush 后销毁对象重新打开、空树重开。
 4. 容量为 2 的长字符串索引，迫使内部节点形成五层以上树；字符串含 NUL、超长和类型错误输入。
 5. BIGINT 最小/最大值及超过 `2^53` 的相邻整数精确查找。
-6. SQL 建索引前后的相同查询结果；重复索引、非法类型/列、NULL、CHAR 填充、范围、LIMIT、多个同列索引。
+6. 批量建树：多种规模与三种扇出，建成后校验全部不变量并继续增删。
+7. 同一批 UPDATE/DELETE 在有索引和无索引的表上逐条对照表内容，包括修改被过滤的列、重复键、NULL 和转发行。
+8. SQL 建索引前后的相同查询结果；重复索引、非法类型/列、NULL、CHAR 填充、范围、LIMIT、多个同列索引。
 7. COPY、键更新、非键更新触发 heap 转发、删除、重开、DROP INDEX 和 DROP TABLE。
 8. 磁盘页篡改后的校验和错误检测。
 
