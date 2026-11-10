@@ -1,0 +1,34 @@
+-- Run from repository root, using a NEW database folder:
+-- ./build/minidb_shell --db /tmp/minidb_index_demo --buffer 16 --file scripts/demo_index.txt
+.echo on
+.timer on
+CREATE TABLE supplier (
+  s_suppkey INTEGER NOT NULL,
+  s_name CHAR(25) NOT NULL,
+  s_address VARCHAR(40) NOT NULL,
+  s_nationkey INTEGER NOT NULL,
+  s_phone CHAR(15) NOT NULL,
+  s_acctbal DECIMAL(15,2) NOT NULL,
+  s_comment VARCHAR(101) NOT NULL
+);
+COPY supplier FROM 'test/tpc-h/supplier.tbl';
+CREATE INDEX supplier_key ON supplier(s_suppkey);
+CREATE INDEX supplier_name ON supplier(s_name);
+PRAGMA indexes(supplier);
+PRAGMA index_stats(supplier_key);
+PRAGMA index_stats(supplier_name);
+PRAGMA index_tree(supplier_key);
+SELECT rid, s_suppkey, s_name FROM supplier WHERE s_suppkey = 42;
+SELECT rid, s_suppkey, s_name FROM supplier WHERE s_name = 'Supplier#000000042';
+SELECT s_suppkey, s_name FROM supplier WHERE s_suppkey >= 9995 LIMIT 6;
+INSERT INTO supplier VALUES (-1, 'IndexDemo', 'demo address', 0, '00-000-000-0000', 12.34, 'new index entry');
+SELECT rid, s_suppkey, s_name FROM supplier WHERE s_suppkey = -1;
+UPDATE supplier SET s_suppkey = -2, s_name = 'IndexChanged' WHERE s_suppkey = -1;
+SELECT s_suppkey, s_name FROM supplier WHERE s_suppkey = -1;
+SELECT rid, s_suppkey, s_name FROM supplier WHERE s_name = 'IndexChanged';
+DELETE FROM supplier WHERE s_suppkey = -2;
+SELECT s_suppkey, s_name FROM supplier WHERE s_name = 'IndexChanged';
+PRAGMA index_check(supplier_key);
+PRAGMA index_check(supplier_name);
+PRAGMA buffer_stats;
+PRAGMA flush;

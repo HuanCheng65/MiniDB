@@ -1,0 +1,7 @@
+2026-11-10 | macOS arm64 | Release | supplier.tbl (10,000 rows)
+supplier_rows=10000 buffer_frames=16 build_seconds=0.0966387
+supplier_key valid=ok entries=10000 height=2 nodes=45 leaves=44 free_pages=0 capacity=450 root=4
+supplier_name valid=ok entries=10000 height=2 nodes=92 leaves=91 free_pages=0 capacity=218 root=4
+reopen_point_lookups=20000 range_vs_heap=OK insert_update_delete=OK
+buffer_miss=1630 evict=1658 flush=63
+final_reopen=OK

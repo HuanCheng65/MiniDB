@@ -19,6 +19,8 @@ enum class PageType : uint16_t {
   kHeap = 6,
   kBtreeInternal = 7,
   kBtreeLeaf = 8,
+  kBtreeMeta = 9,
+  kBtreeFree = 10,
 };
 
 constexpr size_t kChecksumOffset = 0;

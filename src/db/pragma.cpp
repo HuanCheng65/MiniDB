@@ -52,6 +52,10 @@ const char* PageTypeName(PageType type) {
       return "HEAP";
     case PageType::kBtreeInternal:
       return "BTREE_INTERNAL";
+    case PageType::kBtreeMeta:
+      return "BTREE_META";
+    case PageType::kBtreeFree:
+      return "BTREE_FREE";
     case PageType::kBtreeLeaf:
       return "BTREE_LEAF";
   }
@@ -528,6 +532,9 @@ Status PragmaList(PragmaContext& ctx) {
   SetColumns(ctx.result, {{"name", TypeId::kVarchar},
                           {"arguments", TypeId::kVarchar},
                           {"description", TypeId::kVarchar}});
+  for (const auto* name : {"indexes", "index_stats", "index_check", "index_tree", "index_dot"})
+    ctx.result->rows.push_back({Text(name), Text(name == std::string("indexes") ? "[table]" : "index"),
+                                Text("B+ tree index introspection")});
   for (const PragmaEntry& entry : kPragmas) {
     ctx.result->rows.push_back(
         {Text(entry.name), Text(entry.arguments), Text(entry.description)});
@@ -541,6 +548,9 @@ Status Database::ExecutePragma(Statement* statement, Transaction* txn,
                                QueryResult* result) {
   PragmaContext ctx{statement->pragma, *catalog_, *pool_, txn, result};
   const std::string name = ToLower(statement->pragma.name);
+  if (name == "indexes" || name == "index_stats" || name == "index_check" ||
+      name == "index_tree" || name == "index_dot")
+    return ExecuteIndexPragma(statement, result);
   for (const PragmaEntry& entry : kPragmas) {
     if (name == entry.name) return entry.run(ctx);
   }

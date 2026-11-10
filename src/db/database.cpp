@@ -211,6 +211,8 @@ Result<std::unique_ptr<Database>> Database::Open(const Config& config) {
 
   const Status status = database->catalog_->BeginSession(!create_new);
   if (!status.ok()) return status;
+  const auto index_status = database->LoadIndexes();
+  if (!index_status.ok()) return index_status;
   return database;
 }
 
@@ -277,6 +279,10 @@ Status Database::Execute(const std::string& sql, QueryResult* result) {
 Status Database::ExecuteStatement(Statement* statement, Transaction* txn,
                                   QueryResult* result) {
   switch (statement->type) {
+    case StatementType::kCreateIndex:
+      return ExecuteCreateIndex(statement, txn, result);
+    case StatementType::kDropIndex:
+      return ExecuteDropIndex(statement, result);
     case StatementType::kCreateTable:
       return ExecuteCreateTable(statement, txn, result);
     case StatementType::kDropTable:
@@ -349,6 +355,8 @@ Status Database::ExecuteDropTable(Statement* statement, Transaction* txn,
     return Status(StatusCode::kInvalidArgument,
                   "system table " + name + " cannot be dropped");
   }
+  auto index_status = DropTableIndexes(*table.value());
+  if (!index_status.ok()) return index_status;
   const Status status = catalog_->DropTable(txn, name);
   if (!status.ok()) return status;
   result->message = "DROP TABLE " + name;
@@ -412,6 +420,8 @@ Status Database::ExecuteInsert(Statement* statement, Transaction* txn,
     if (!tuple.ok()) return tuple.status();
     auto rid = table->heap->Insert(txn, tuple.value());
     if (!rid.ok()) return rid.status();
+    auto index_status = MaintainIndexes(*table, rid.value(), nullptr, &tuple.value());
+    if (!index_status.ok()) return index_status;
     ++inserted;
   }
   result->changes = inserted;
@@ -472,8 +482,12 @@ Status Database::ExecuteDelete(Statement* statement, Transaction* txn,
 
   int deleted = 0;
   for (const RID& target : matches) {
+    auto old_tuple = table->heap->Get(txn, target);
+    if (!old_tuple.ok()) return old_tuple.status();
     const Status status = table->heap->Delete(txn, target);
     if (!status.ok()) return status;
+    auto index_status = MaintainIndexes(*table, target, &old_tuple.value(), nullptr);
+    if (!index_status.ok()) return index_status;
     ++deleted;
   }
   result->changes = deleted;
@@ -565,6 +579,8 @@ Status Database::ExecuteUpdate(Statement* statement, Transaction* txn,
     if (!new_tuple.ok()) return new_tuple.status();
     auto status = table->heap->Update(txn, target, new_tuple.value());
     if (!status.ok()) return status.status();
+    auto index_status = MaintainIndexes(*table, target, &old_tuple, &new_tuple.value());
+    if (!index_status.ok()) return index_status;
     ++updated;
   }
   result->changes = updated;
@@ -670,6 +686,25 @@ Status Database::ExecuteSelect(Statement* statement, Transaction* txn,
     }
   }
 
+  if (where_index >= 0) {
+    if (auto* index = FindIndex(*table, static_cast<size_t>(where_index))) {
+      result->message = "INDEX SCAN " + index->metadata().name;
+      if (spec.limit == 0) return Status::Ok();
+      Status lookup_status;
+      auto status = index->Scan(spec.where_op, where_value, [&](const IndexEntry& entry) {
+        auto tuple = table->heap->Get(txn, entry.rid);
+        if (!tuple.ok()) { lookup_status = tuple.status(); return false; }
+        auto values = Tuple::Decode(schema, tuple.value().data().data(), tuple.value().size());
+        if (!values.ok()) { lookup_status = values.status(); return false; }
+        if (Matches(values.value()[where_index], spec.where_op, where_value))
+          emit(entry.rid, values.value());
+        return spec.limit < 0 || static_cast<int64_t>(result->rows.size()) < spec.limit;
+      });
+      if (!status.ok()) return status;
+      return lookup_status;
+    }
+  }
+
   int64_t emitted = 0;
   auto iterator = table->heap->Scan(txn);
   RID rid;
@@ -767,6 +802,8 @@ Status Database::ExecuteCopy(Statement* statement, Transaction* txn,
     if (!tuple.ok()) return fail(tuple.status());
     auto rid = table->heap->Insert(txn, tuple.value());
     if (!rid.ok()) return fail(rid.status());
+    auto index_status = MaintainIndexes(*table, rid.value(), nullptr, &tuple.value());
+    if (!index_status.ok()) return fail(index_status);
     ++loaded;
     if (loaded % 100000 == 0) {
       MINIDB_LOG_INFO("LOAD") << table->name << " rows=" << loaded

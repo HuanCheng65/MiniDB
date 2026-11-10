@@ -80,6 +80,8 @@ struct PragmaSpec {
 };
 
 enum class StatementType {
+  kCreateIndex,
+  kDropIndex,
   kCreateTable,
   kDropTable,
   kInsert,
@@ -96,6 +98,8 @@ enum class StatementType {
 struct Statement {
   StatementType type = StatementType::kEmpty;
   std::string table_name;
+  std::string index_name;
+  std::string index_column;
   bool if_not_exists = false;
   bool if_exists = false;
   std::vector<ColumnSpec> columns;

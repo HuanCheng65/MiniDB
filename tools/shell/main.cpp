@@ -68,6 +68,15 @@ bool ParseOptions(int argc, char** argv, Options* options) {
 void PrintTable(const std::vector<std::string>& headers,
                 const std::vector<std::vector<std::string>>& rows) {
   if (headers.empty()) return;
+  // Tree/DOT cells are multiline documents, not table cells. Printing a
+  // separator as wide as the entire document makes large trees unreadable.
+  if (headers.size() == 1 &&
+      (headers[0] == "index_tree" || headers[0] == "index_dot")) {
+    for (const auto& row : rows) {
+      if (!row.empty()) std::cout << row[0] << '\n';
+    }
+    return;
+  }
   std::vector<size_t> widths;
   widths.reserve(headers.size());
   for (const std::string& header : headers) widths.push_back(header.size());
@@ -128,7 +137,7 @@ bool ExecuteAndPrint(mydb_db* db, const std::string& sql) {
   }
   if (!headers.empty()) PrintTable(headers, rows);
   const char* message = mydb_message(db);
-  if (message != nullptr && headers.empty()) std::cout << message << "\n";
+  if (message != nullptr && *message != '\0') std::cout << message << "\n";
   if (mydb_changes(db) > 0) {
     std::cout << "changes: " << mydb_changes(db) << "\n";
   }
