@@ -399,6 +399,81 @@ void SqlIntegration() {
   std::filesystem::remove_all(dir);
   std::filesystem::remove(copy_path);
 }
+// UPDATE and DELETE locate rows through an index when one exists. The same
+// statements on an indexed and an unindexed copy of a table must change the
+// same rows, including when they rewrite the very column they filter on.
+void DmlThroughIndex() {
+  const auto dir = Temp("dml");
+  std::filesystem::remove_all(dir);
+  Config config;
+  config.path = dir;
+  config.buffer_pool_frames = 8;
+  config.log_level = "off";
+  auto db = Take(Database::Open(config));
+  for (const std::string table : {"plain", "indexed"}) {
+    Exec(*db, "CREATE TABLE " + table +
+                  " (id INTEGER, k INTEGER, s CHAR(12), v VARCHAR(4000));");
+    std::string insert = "INSERT INTO " + table + " VALUES ";
+    for (int i = 0; i < 1500; ++i) {
+      if (i) insert += ',';
+      insert +=
+          '(' + std::to_string(i) + ',' +
+          (i % 17 == 0 ? "NULL" : std::to_string(i * 7 % 101)) + ',' +
+          (i % 13 == 0 ? "NULL" : "'name" + std::to_string(i % 10) + "'") +
+          ",'x')";
+    }
+    Exec(*db, insert);
+  }
+  // Rows that outgrow their page are forwarded but keep their RID.
+  const std::string grow = " SET v = '" + std::string(2500, 'x') + "' WHERE ";
+  Exec(*db, "UPDATE indexed" + grow + "id < 40");
+  Exec(*db, "UPDATE plain" + grow + "id < 40");
+  Exec(*db, "CREATE INDEX ik ON indexed(k); CREATE INDEX i_s ON indexed(s);");
+
+  struct Step {
+    std::string before, after;  // around the table name
+    bool by_index;
+  };
+  const std::vector<Step> steps = {
+      {"UPDATE ", " SET k = 500 WHERE k = 7", true},
+      {"UPDATE ", " SET k = 8 WHERE k >= 90", true},
+      {"UPDATE ", " SET k = 1000 WHERE k < 5", true},
+      {"UPDATE ", " SET k = NULL WHERE k = 20", true},
+      {"UPDATE ", " SET s = 'moved' WHERE s <= 'name3'", true},
+      {"UPDATE ", " SET k = 3 WHERE s = 'moved   '", true},
+      {"UPDATE ", grow + "k = 8", true},
+      {"UPDATE ", " SET k = 77 WHERE k != 500", false},
+      {"UPDATE ", " SET s = 'late' WHERE id >= 1400", false},
+      {"DELETE FROM ", " WHERE k = 500", true},
+      {"DELETE FROM ", " WHERE s > 'name8'", true},
+      {"DELETE FROM ", " WHERE k <= 3", true},
+      {"UPDATE ", " SET v = 'small' WHERE k = 77", true},
+      {"DELETE FROM ", " WHERE k = 12345", true},
+      {"DELETE FROM ", " WHERE k >= 0", true},
+      {"DELETE FROM ", "", false},
+  };
+  for (const Step& step : steps) {
+    const auto plain = Exec(*db, step.before + "plain" + step.after);
+    const auto indexed = Exec(*db, step.before + "indexed" + step.after);
+    REQUIRE(plain.changes == indexed.changes);
+    REQUIRE(plain.message.find("INDEX SCAN") == std::string::npos);
+    REQUIRE((indexed.message.find("INDEX SCAN") != std::string::npos) ==
+            step.by_index);
+    REQUIRE(Rows(Exec(*db, "SELECT * FROM plain")) ==
+            Rows(Exec(*db, "SELECT * FROM indexed")));
+    const auto remaining = Exec(*db, "SELECT * FROM indexed").rows.size();
+    int64_t nulls = 0;
+    for (const auto& row : Exec(*db, "SELECT k FROM indexed").rows)
+      nulls += row[0].IsNull();
+    REQUIRE(Exec(*db, "PRAGMA index_check(ik)").rows[0][1].int64_value ==
+            static_cast<int64_t>(remaining) - nulls);
+    Exec(*db, "PRAGMA index_check(i_s)");
+  }
+  REQUIRE(Exec(*db, "SELECT * FROM indexed").rows.empty());
+  Ok(db->Close());
+  std::filesystem::remove_all(dir);
+}
+
 void ChecksumDetection() {
   auto dir = Temp("crc");
   std::filesystem::remove_all(dir);
@@ -439,6 +514,8 @@ int main() {
   std::cout << "tiny fanout/BIGINT boundaries: OK\n";
   SqlIntegration();
   std::cout << "SQL build/maintenance/ranges/reopen/drop: OK\n";
+  DmlThroughIndex();
+  std::cout << "UPDATE/DELETE through indexes vs. heap scan: OK\n";
   ChecksumDetection();
   std::cout << "checksum corruption detection: OK\n";
 }

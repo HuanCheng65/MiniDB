@@ -166,6 +166,12 @@ Status Database::DropTableIndexes(const TableInfo& table) {
   return Status::Ok();
 }
 
+bool Database::HasIndexes(const TableInfo& table) const {
+  for (const auto& [name, tree] : indexes_)
+    if (tree->metadata().table_id == table.table_id) return true;
+  return false;
+}
+
 BPlusTree* Database::FindIndex(const TableInfo& table, size_t column) {
   for (auto& [name, tree] : indexes_)
     if (tree->metadata().table_id == table.table_id &&
@@ -176,13 +182,7 @@ BPlusTree* Database::FindIndex(const TableInfo& table, size_t column) {
 
 Status Database::MaintainIndexes(const TableInfo& table, RID rid,
                                  const Tuple* before, const Tuple* after) {
-  bool indexed = false;
-  for (const auto& [name, tree] : indexes_)
-    if (tree->metadata().table_id == table.table_id) {
-      indexed = true;
-      break;
-    }
-  if (!indexed) return Status::Ok();
+  if (!HasIndexes(table)) return Status::Ok();
   std::vector<Value> old_values, new_values;
   if (before) {
     auto decoded =

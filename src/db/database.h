@@ -2,6 +2,7 @@
 // (design doc 3.4, 18).
 #pragma once
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -36,6 +37,13 @@ struct QueryResult {
   std::vector<std::vector<Value>> rows;
   int changes = 0;
   std::string message;
+};
+
+// The single `column op value` condition a statement's WHERE clause allows.
+struct RowFilter {
+  int column = -1;  // schema ordinal; -1 when there is no WHERE
+  CompareOp op = CompareOp::kEq;
+  Value value;
 };
 
 class Database {
@@ -86,6 +94,15 @@ class Database {
   Status DropIndex(const std::string& name);
   Status DropTableIndexes(const TableInfo& table);
   BPlusTree* FindIndex(const TableInfo& table, size_t column);
+  bool HasIndexes(const TableInfo& table) const;
+  // Visits the rows of `table` that satisfy `filter` until the visitor
+  // returns false: through an index on the filtered column when one helps,
+  // otherwise by scanning the heap. Returns the index used, or null. The
+  // visitor must not modify the table.
+  using RowVisitor =
+      std::function<bool(RID, const Tuple&, const std::vector<Value>&)>;
+  Result<BPlusTree*> FindRows(const TableInfo& table, Transaction* txn,
+                              const RowFilter& filter, const RowVisitor& visit);
   Status MaintainIndexes(const TableInfo& table, RID rid, const Tuple* before,
                          const Tuple* after);
 
