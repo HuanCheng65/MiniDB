@@ -1,4 +1,5 @@
-// Disk-backed B+ tree. Only visited nodes are decoded; all I/O uses BufferPool.
+// Disk-backed B+ tree. Nodes are searched and edited in their on-disk form;
+// all I/O uses BufferPool.
 #pragma once
 
 #include <functional>
@@ -64,27 +65,21 @@ class BPlusTree {
   uint64_t size() const { return entries_; }
 
  private:
-  struct Node {
-    page_id_t id = kInvalidPageId;
-    bool leaf = true;
-    page_id_t next = kInvalidPageId;
-    std::vector<IndexEntry> keys;
-    std::vector<page_id_t> children;
-  };
+  class Node;
   struct Split {
     IndexEntry separator;
     page_id_t right;
   };
   BPlusTree(BufferPool& pool, DiskManager::Ptr disk, IndexMetadata metadata);
   Status CheckKey(const Value& key) const;
-  Result<Node> Read(page_id_t id);
+  Status Read(page_id_t id, Node* node);
   Status Write(const Node& node);
   Status SaveMetadata();
   Result<page_id_t> Allocate();
   Status Free(page_id_t id);
   Result<std::optional<Split>> InsertNode(page_id_t id,
                                           const IndexEntry& entry);
-  Status EraseNode(page_id_t id, const IndexEntry& entry);
+  Status EraseNode(page_id_t id, const IndexEntry& entry, size_t* remaining);
   Status Rebalance(Node* parent, size_t child);
   // Leaf that would hold `entry`; the leftmost leaf when it is null.
   Result<page_id_t> FindLeaf(const IndexEntry* entry);
@@ -92,6 +87,7 @@ class BPlusTree {
   BufferPool& pool_;
   DiskManager::Ptr disk_;
   IndexMetadata metadata_;
+  bool string_keys_ = false;
   size_t key_bytes_ = 0;
   size_t capacity_ = 0;
   page_id_t root_ = 2;
