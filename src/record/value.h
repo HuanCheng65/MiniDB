@@ -74,4 +74,25 @@ std::string ValueToString(const Value& value);
 // lexicographically, dates by day count.
 int CompareValues(const Value& left, const Value& right);
 
+enum class CompareOp { kEq, kNe, kLt, kLe, kGt, kGe };
+
+// Whether a CompareValues result satisfies the operator.
+inline bool Satisfies(int cmp, CompareOp op) {
+  switch (op) {
+    case CompareOp::kEq:
+      return cmp == 0;
+    case CompareOp::kNe:
+      return cmp != 0;
+    case CompareOp::kLt:
+      return cmp < 0;
+    case CompareOp::kLe:
+      return cmp <= 0;
+    case CompareOp::kGt:
+      return cmp > 0;
+    case CompareOp::kGe:
+      return cmp >= 0;
+  }
+  return false;
+}
+
 }  // namespace minidb

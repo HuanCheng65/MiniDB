@@ -101,6 +101,7 @@ Status Database::ExecuteCreateIndex(Statement* statement, Transaction* txn,
     return failure;
   };
   {
+    std::vector<IndexEntry> entries;
     auto iterator = table->heap->Scan(txn);
     RID rid;
     Tuple tuple;
@@ -108,10 +109,11 @@ Status Database::ExecuteCreateIndex(Statement* statement, Transaction* txn,
       auto values =
           Tuple::Decode(table->schema, tuple.data().data(), tuple.size());
       if (!values.ok()) return cleanup(values.status());
-      s = tree->Insert(values.value()[ordinal], rid);
-      if (!s.ok()) return cleanup(s);
+      entries.push_back({std::move(values.value()[ordinal]), rid});
     }
     if (!iterator.status().ok()) return cleanup(iterator.status());
+    s = tree->BulkLoad(std::move(entries));
+    if (!s.ok()) return cleanup(s);
   }
   const auto count = tree->size();
   s = pool_->FlushAll();
@@ -218,60 +220,6 @@ Status Database::MaintainIndexes(const TableInfo& table, RID rid,
                    : "; index cleanup failed: " + dropped.message()));
     }
   }
-  return Status::Ok();
-}
-
-Status Database::ExecuteIndexPragma(Statement* statement, QueryResult* result) {
-  const auto& spec = statement->pragma;
-  const auto name = ToLower(spec.name);
-  if (name == "indexes") {
-    if (spec.has_value || spec.args.size() > 1)
-      return Status(StatusCode::kInvalidArgument,
-                    "usage: PRAGMA indexes[(table)]");
-    result->columns = {{"index", TypeId::kVarchar},
-                       {"table", TypeId::kVarchar},
-                       {"column", TypeId::kVarchar},
-                       {"type", TypeId::kVarchar},
-                       {"entries", TypeId::kInt64}};
-    for (const auto& [index_name, tree] : indexes_) {
-      const auto& m = tree->metadata();
-      if (!spec.args.empty() && ToLower(spec.args[0].text) != m.table) continue;
-      auto table = catalog_->GetTable(m.table);
-      if (!table.ok()) return table.status();
-      result->rows.push_back(
-          {Value::String(index_name), Value::String(m.table),
-           Value::String(table.value()->schema.GetColumn(m.column).name),
-           Value::String(table.value()->schema.TypeName(m.column)),
-           Value::Int64(tree->size())});
-    }
-    return Status::Ok();
-  }
-  if (spec.has_value || spec.args.size() != 1)
-    return Status(StatusCode::kInvalidArgument,
-                  "usage: PRAGMA " + name + "(index)");
-  const auto found = indexes_.find(ToLower(spec.args[0].text));
-  if (found == indexes_.end())
-    return Status(StatusCode::kNotFound, "index not found");
-  if (name == "index_dot" || name == "index_tree") {
-    auto drawing =
-        name == "index_dot" ? found->second->Dot() : found->second->Draw();
-    if (!drawing.ok()) return drawing.status();
-    result->columns = {{name, TypeId::kVarchar}};
-    result->rows = {{Value::String(drawing.TakeValue())}};
-    return Status::Ok();
-  }
-  auto stats = found->second->Validate();
-  if (!stats.ok()) return stats.status();
-  const auto& s = stats.value();
-  result->columns = {
-      {"valid", TypeId::kVarchar},  {"entries", TypeId::kInt64},
-      {"height", TypeId::kInt32},   {"nodes", TypeId::kInt32},
-      {"leaves", TypeId::kInt32},   {"free_pages", TypeId::kInt32},
-      {"capacity", TypeId::kInt32}, {"root", TypeId::kInt64}};
-  result->rows = {{Value::String("ok"), Value::Int64(s.entries),
-                   Value::Int32(s.height), Value::Int32(s.nodes),
-                   Value::Int32(s.leaves), Value::Int32(s.free_pages),
-                   Value::Int32(s.capacity), Value::Int64(s.root)}};
   return Status::Ok();
 }
 }  // namespace minidb

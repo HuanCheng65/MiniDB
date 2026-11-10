@@ -47,13 +47,14 @@ Value Key(int i, bool strings) {
 RID Rid(int i) {
   return {static_cast<page_id_t>(100 + i / 30), static_cast<slot_id_t>(i % 30)};
 }
-bool Matches(int cmp, const std::string& op) {
-  return op == "="    ? cmp == 0
-         : op == "<"  ? cmp < 0
-         : op == "<=" ? cmp <= 0
-         : op == ">"  ? cmp > 0
-         : op == ">=" ? cmp >= 0
-                      : cmp != 0;
+// Deliberately independent of the engine's Satisfies().
+bool Matches(int cmp, CompareOp op) {
+  return op == CompareOp::kEq   ? cmp == 0
+         : op == CompareOp::kLt ? cmp < 0
+         : op == CompareOp::kLe ? cmp <= 0
+         : op == CompareOp::kGt ? cmp > 0
+         : op == CompareOp::kGe ? cmp >= 0
+                                : cmp != 0;
 }
 uint64_t Packed(RID r) {
   return (static_cast<uint64_t>(r.page_id) << 16) | r.slot;
@@ -62,7 +63,8 @@ void CheckModel(BPlusTree& tree, const std::set<int>& active, bool strings,
                 int probe) {
   auto stats = Take(tree.Validate());
   REQUIRE(stats.entries == active.size());
-  for (const std::string op : {"=", "<", "<=", ">", ">=", "!=", "<>"}) {
+  for (const CompareOp op : {CompareOp::kEq, CompareOp::kLt, CompareOp::kLe,
+                             CompareOp::kGt, CompareOp::kGe, CompareOp::kNe}) {
     std::set<uint64_t> expected, actual;
     for (int i : active)
       if (Matches(CompareValues(Key(i, strings), Key(probe, strings)), op))
@@ -163,6 +165,65 @@ void TreeRandom(bool strings) {
   }
   std::filesystem::remove_all(dir);
 }
+// Bulk-loaded trees must satisfy every invariant, answer scans like the model
+// and keep working under later inserts and erases, at any size and fanout.
+void BulkLoad() {
+  auto dir = Temp("bulk");
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  LogManager log;
+  BufferPool pool(log, BufferConfig{4, "clock"});
+  int file = 0;
+  // Length 4000 gives capacity 2; length 250 capacity 30; integers 450.
+  for (const int length : {4000, 250, 0}) {
+    const bool strings = length != 0;
+    const IndexMetadata m{"b",
+                          "t",
+                          3,
+                          0,
+                          strings ? TypeId::kVarchar : TypeId::kInt64,
+                          static_cast<uint16_t>(length)};
+    const auto capacity = [&] {
+      auto probe = Take(BPlusTree::Create(
+          pool, dir + "/probe" + std::to_string(length) + ".idx", m));
+      return static_cast<int>(Take(probe->Validate()).capacity);
+    }();
+    const int fill = capacity - capacity / 8;
+    for (const int count :
+         {0, 1, capacity / 2, fill, fill + 1, capacity, capacity + 1,
+          2 * fill + 1, fill * (fill + 1) + 1, strings ? 700 : 30000}) {
+      if (count > 30000) continue;
+      auto tree = Take(BPlusTree::Create(
+          pool, dir + "/" + std::to_string(file++) + ".idx", m));
+      std::vector<IndexEntry> entries;
+      std::set<int> active;
+      for (int i = count - 1; i >= 0; --i) {
+        entries.push_back({Key(i, strings), Rid(i)});
+        active.insert(i);
+      }
+      entries.push_back({Value::Null(), Rid(count)});
+      Ok(tree->BulkLoad(std::move(entries)));
+      CheckModel(*tree, active, strings, count / 2);
+      // Only an empty tree can be bulk loaded.
+      if (count > 0) REQUIRE(!tree->BulkLoad({{Key(0, strings), Rid(0)}}).ok());
+      for (int i = count; i < count + 40; ++i) {
+        Ok(tree->Insert(Key(i, strings), Rid(i)));
+        active.insert(i);
+      }
+      for (int i = 0; i < count; i += 2) {
+        Ok(tree->Erase(Key(i, strings), Rid(i)));
+        active.erase(i);
+      }
+      CheckModel(*tree, active, strings, count / 3);
+    }
+  }
+  auto tree = Take(BPlusTree::Create(pool, dir + "/dup.idx",
+                                     {"d", "t", 3, 0, TypeId::kInt64, 0}));
+  REQUIRE(
+      !tree->BulkLoad({{Key(1, false), Rid(1)}, {Key(1, false), Rid(1)}}).ok());
+  std::filesystem::remove_all(dir);
+}
+
 void TinyFanoutAndBoundaries() {
   auto dir = Temp("tiny");
   std::filesystem::remove_all(dir);
@@ -261,7 +322,10 @@ void SqlIntegration() {
   for (size_t i = 0; i < queries.size(); ++i) {
     auto r = Exec(*db, queries[i]);
     REQUIRE(Rows(r) == expected[i]);
-    REQUIRE(r.message.find("INDEX SCAN") != std::string::npos);
+    // Inequality matches almost every row, so it stays a heap scan.
+    const bool inequality = queries[i].find("!=") != std::string::npos ||
+                            queries[i].find("<>") != std::string::npos;
+    REQUIRE((r.message.find("INDEX SCAN") == std::string::npos) == inequality);
   }
   REQUIRE(Exec(*db, "SELECT * FROM t WHERE id >= 0 LIMIT 3").rows.size() == 3);
   REQUIRE(Exec(*db, "SELECT * FROM t WHERE id >= 0 LIMIT 0").rows.empty());
@@ -369,6 +433,8 @@ int main() {
   std::cout << "integer randomized/persistence: OK\n";
   TreeRandom(true);
   std::cout << "string randomized/internal splits: OK\n";
+  BulkLoad();
+  std::cout << "bulk load sizes/fanouts/then maintenance: OK\n";
   TinyFanoutAndBoundaries();
   std::cout << "tiny fanout/BIGINT boundaries: OK\n";
   SqlIntegration();

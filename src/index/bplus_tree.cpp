@@ -30,6 +30,37 @@ std::string DotEscape(const std::string& text) {
   }
   return out;
 }
+
+// Entries order by key, then RID, so duplicate keys stay distinct and sorted.
+int CompareEntries(const IndexEntry& a, const IndexEntry& b) {
+  const int key = CompareValues(a.key, b.key);
+  if (key) return key;
+  if (a.rid.page_id != b.rid.page_id)
+    return a.rid.page_id < b.rid.page_id ? -1 : 1;
+  return a.rid.slot < b.rid.slot ? -1 : a.rid.slot > b.rid.slot ? 1 : 0;
+}
+bool EntryLess(const IndexEntry& a, const IndexEntry& b) {
+  return CompareEntries(a, b) < 0;
+}
+// Position of the first key not less than `entry` (its slot in a leaf).
+size_t LowerBound(const std::vector<IndexEntry>& keys,
+                  const IndexEntry& entry) {
+  return std::lower_bound(keys.begin(), keys.end(), entry, EntryLess) -
+         keys.begin();
+}
+// Child to descend into: separators equal to `entry` send it right.
+size_t ChildIndex(const std::vector<IndexEntry>& keys,
+                  const IndexEntry& entry) {
+  return std::upper_bound(keys.begin(), keys.end(), entry, EntryLess) -
+         keys.begin();
+}
+// Splits `count` items into the fewest groups of at most `target` items, then
+// drops groups while an even split would leave them below `minimum`.
+size_t GroupCount(size_t count, size_t target, size_t minimum) {
+  size_t groups = (count + target - 1) / target;
+  while (groups > 1 && count / groups < minimum) --groups;
+  return groups;
+}
 }  // namespace
 
 BPlusTree::BPlusTree(BufferPool& pool, DiskManager::Ptr disk,
@@ -126,14 +157,6 @@ Status BPlusTree::SaveMetadata() {
   std::memcpy(p + 80 + metadata_.name.size(), metadata_.table.data(),
               metadata_.table.size());
   return Status::Ok();
-}
-
-int BPlusTree::Compare(const IndexEntry& a, const IndexEntry& b) {
-  const int key = CompareValues(a.key, b.key);
-  if (key) return key;
-  if (a.rid.page_id != b.rid.page_id)
-    return a.rid.page_id < b.rid.page_id ? -1 : 1;
-  return a.rid.slot < b.rid.slot ? -1 : a.rid.slot > b.rid.slot ? 1 : 0;
 }
 
 Status BPlusTree::CheckKey(const Value& key) const {
@@ -261,18 +284,12 @@ Result<std::optional<BPlusTree::Split>> BPlusTree::InsertNode(
   if (!loaded.ok()) return loaded.status();
   Node n = loaded.TakeValue();
   if (n.leaf) {
-    auto at = std::lower_bound(
-        n.keys.begin(), n.keys.end(), entry,
-        [](const auto& a, const auto& b) { return Compare(a, b) < 0; });
-    if (at != n.keys.end() && Compare(*at, entry) == 0)
+    const size_t at = LowerBound(n.keys, entry);
+    if (at < n.keys.size() && CompareEntries(n.keys[at], entry) == 0)
       return Status(StatusCode::kAlreadyExists, "index entry already exists");
-    n.keys.insert(at, entry);
+    n.keys.insert(n.keys.begin() + at, entry);
   } else {
-    const size_t at = std::upper_bound(n.keys.begin(), n.keys.end(), entry,
-                                       [](const auto& a, const auto& b) {
-                                         return Compare(a, b) < 0;
-                                       }) -
-                      n.keys.begin();
+    const size_t at = ChildIndex(n.keys, entry);
     auto split = InsertNode(n.children[at], entry);
     if (!split.ok()) return split.status();
     if (!split.value()) return std::optional<Split>{};
@@ -327,6 +344,82 @@ Status BPlusTree::Insert(const Value& key, RID rid) {
     root_ = root.id;
   }
   ++entries_;
+  return SaveMetadata();
+}
+
+Status BPlusTree::BulkLoad(std::vector<IndexEntry> entries) {
+  if (entries_ != 0)
+    return Status(StatusCode::kInvalidArgument,
+                  "bulk load needs an empty tree");
+  for (const auto& entry : entries) {
+    auto status = CheckKey(entry.key);
+    if (!status.ok()) return status;
+  }
+  std::erase_if(entries, [](const auto& e) { return e.key.IsNull(); });
+  if (entries.empty()) return Status::Ok();
+  std::sort(entries.begin(), entries.end(), EntryLess);
+  if (std::adjacent_find(entries.begin(), entries.end(),
+                         [](const auto& a, const auto& b) {
+                           return CompareEntries(a, b) == 0;
+                         }) != entries.end())
+    return Status(StatusCode::kAlreadyExists, "index entry already exists");
+
+  // A finished node and its lowest entry, which separates it from its left
+  // sibling in the parent.
+  struct Built {
+    page_id_t id;
+    IndexEntry lowest;
+  };
+  // Leave an eighth of each node free so the first inserts do not split.
+  const size_t fill = capacity_ - capacity_ / 8;
+
+  // Leaves: page IDs are assigned first so each leaf can link to the next.
+  // The first one reuses the empty root page written by Create().
+  size_t groups = GroupCount(entries.size(), fill, capacity_ / 2);
+  std::vector<page_id_t> ids(groups, root_);
+  for (size_t i = 1; i < groups; ++i) {
+    auto id = Allocate();
+    if (!id.ok()) return id.status();
+    ids[i] = id.value();
+  }
+  std::vector<Built> level;
+  auto next = entries.begin();
+  for (size_t i = 0; i < groups; ++i) {
+    const size_t size = entries.size() / groups + (i < entries.size() % groups);
+    Node leaf;
+    leaf.id = ids[i];
+    leaf.next = i + 1 < groups ? ids[i + 1] : kInvalidPageId;
+    leaf.keys.assign(next, next + size);
+    next += size;
+    auto status = Write(leaf);
+    if (!status.ok()) return status;
+    level.push_back({leaf.id, leaf.keys.front()});
+  }
+
+  // Internal levels, bottom-up, until a single node (the root) remains.
+  while (level.size() > 1) {
+    groups = GroupCount(level.size(), fill + 1, capacity_ / 2 + 1);
+    std::vector<Built> parents;
+    auto child = level.begin();
+    for (size_t i = 0; i < groups; ++i) {
+      const size_t size = level.size() / groups + (i < level.size() % groups);
+      auto id = Allocate();
+      if (!id.ok()) return id.status();
+      Node node;
+      node.id = id.value();
+      node.leaf = false;
+      for (size_t j = 0; j < size; ++j, ++child) {
+        if (j) node.keys.push_back(child->lowest);
+        node.children.push_back(child->id);
+      }
+      auto status = Write(node);
+      if (!status.ok()) return status;
+      parents.push_back({node.id, (child - size)->lowest});
+    }
+    level = std::move(parents);
+  }
+  root_ = level.front().id;
+  entries_ = entries.size();
   return SaveMetadata();
 }
 
@@ -402,18 +495,12 @@ Status BPlusTree::EraseNode(page_id_t id, const IndexEntry& entry) {
   if (!loaded.ok()) return loaded.status();
   Node n = loaded.TakeValue();
   if (n.leaf) {
-    auto at = std::lower_bound(
-        n.keys.begin(), n.keys.end(), entry,
-        [](const auto& a, const auto& b) { return Compare(a, b) < 0; });
-    if (at == n.keys.end() || Compare(*at, entry) != 0)
+    const size_t at = LowerBound(n.keys, entry);
+    if (at == n.keys.size() || CompareEntries(n.keys[at], entry) != 0)
       return Status(StatusCode::kNotFound, "index entry not found");
-    n.keys.erase(at);
+    n.keys.erase(n.keys.begin() + at);
   } else {
-    const size_t at = std::upper_bound(n.keys.begin(), n.keys.end(), entry,
-                                       [](const auto& a, const auto& b) {
-                                         return Compare(a, b) < 0;
-                                       }) -
-                      n.keys.begin();
+    const size_t at = ChildIndex(n.keys, entry);
     auto s = EraseNode(n.children[at], entry);
     if (!s.ok()) return s;
     s = Rebalance(&n, at);
@@ -439,66 +526,41 @@ Status BPlusTree::Erase(const Value& key, RID rid) {
   return SaveMetadata();
 }
 
-Result<page_id_t> BPlusTree::FindLeaf(const IndexEntry& entry) {
+Result<page_id_t> BPlusTree::FindLeaf(const IndexEntry* entry) {
   page_id_t id = root_;
+  // Bounded so a corrupt child pointer cannot loop forever.
   for (size_t depth = 0; depth < 64; ++depth) {
     auto n = Read(id);
     if (!n.ok()) return n.status();
     if (n.value().leaf) return id;
-    const size_t at =
-        std::upper_bound(
-            n.value().keys.begin(), n.value().keys.end(), entry,
-            [](const auto& a, const auto& b) { return Compare(a, b) < 0; }) -
-        n.value().keys.begin();
-    id = n.value().children[at];
+    const auto& node = n.value();
+    id = node.children[entry ? ChildIndex(node.keys, *entry) : 0];
   }
   return Corrupt("tree depth/cycle");
 }
 
-Status BPlusTree::Scan(const std::string& op, const Value& key,
+Status BPlusTree::Scan(CompareOp op, const Value& key,
                        const std::function<bool(const IndexEntry&)>& visitor) {
-  if (op != "=" && op != "<" && op != "<=" && op != ">" && op != ">=" &&
-      op != "!=" && op != "<>")
-    return Status(StatusCode::kInvalidArgument, "unsupported index comparison");
-  // Query bounds may be longer than the column; they need no on-disk encoding.
-  if (!key.IsNull() &&
-      (StringType(metadata_.type)
-           ? key.kind != ValueKind::kString
-           : key.kind != ValueKind::kInt32 && key.kind != ValueKind::kInt64))
-    return Status(StatusCode::kTypeMismatch, "wrong index bound type");
-  if (key.IsNull()) return Status::Ok();
-  page_id_t id = root_;
-  if (op == "=" || op == ">" || op == ">=") {
-    auto leaf = FindLeaf({key, {0, 0}});
-    if (!leaf.ok()) return leaf.status();
-    id = leaf.value();
-  } else {
-    for (size_t depth = 0;; ++depth) {
-      if (depth >= 64) return Corrupt("tree depth/cycle");
-      auto n = Read(id);
-      if (!n.ok()) return n.status();
-      if (n.value().leaf) break;
-      id = n.value().children.front();
-    }
-  }
-  size_t visited = 0;
-  while (id != kInvalidPageId) {
-    if (++visited > next_page_) return Corrupt("leaf chain cycle");
+  if (key.IsNull()) return Status::Ok();  // NULL compares true with nothing
+  // Operators bounded below start at the key's leaf, the rest at the leftmost
+  // leaf; operators bounded above stop at the first entry past the key.
+  const bool bounded_below =
+      op == CompareOp::kEq || op == CompareOp::kGt || op == CompareOp::kGe;
+  const bool bounded_above =
+      op == CompareOp::kEq || op == CompareOp::kLt || op == CompareOp::kLe;
+  const IndexEntry lowest{key, {0, 0}};
+  auto leaf = FindLeaf(bounded_below ? &lowest : nullptr);
+  if (!leaf.ok()) return leaf.status();
+  for (page_id_t id = leaf.value(); id != kInvalidPageId;) {
     auto n = Read(id);
     if (!n.ok()) return n.status();
-    if (!n.value().leaf) return Corrupt("non-leaf in leaf chain");
     for (const auto& e : n.value().keys) {
       const int cmp = CompareValues(e.key, key);
-      if ((op == "=" && cmp > 0) || (op == "<" && cmp >= 0) ||
-          (op == "<=" && cmp > 0))
+      if (Satisfies(cmp, op)) {
+        if (!visitor(e)) return Status::Ok();
+      } else if (bounded_above && cmp >= 0) {
         return Status::Ok();
-      const bool match = op == "="    ? cmp == 0
-                         : op == "<"  ? cmp < 0
-                         : op == "<=" ? cmp <= 0
-                         : op == ">"  ? cmp > 0
-                         : op == ">=" ? cmp >= 0
-                                      : cmp != 0;
-      if (match && !visitor(e)) return Status::Ok();
+      }
     }
     id = n.value().next;
   }
@@ -507,7 +569,7 @@ Status BPlusTree::Scan(const std::string& op, const Value& key,
 
 Result<std::vector<RID>> BPlusTree::Find(const Value& key) {
   std::vector<RID> result;
-  auto s = Scan("=", key, [&](const IndexEntry& entry) {
+  auto s = Scan(CompareOp::kEq, key, [&](const IndexEntry& entry) {
     result.push_back(entry.rid);
     return true;
   });
@@ -538,11 +600,11 @@ Result<IndexStats> BPlusTree::Validate() {
     if (id == root_ && !node.leaf && node.keys.empty())
       return Corrupt("empty internal root");
     for (size_t i = 0; i < node.keys.size(); ++i) {
-      if (i && Compare(node.keys[i - 1], node.keys[i]) >= 0)
+      if (i && CompareEntries(node.keys[i - 1], node.keys[i]) >= 0)
         return Corrupt("unsorted keys");
-      if (low && Compare(node.keys[i], *low) < 0)
+      if (low && CompareEntries(node.keys[i], *low) < 0)
         return Corrupt("key below fence");
-      if (high && Compare(node.keys[i], *high) >= 0)
+      if (high && CompareEntries(node.keys[i], *high) >= 0)
         return Corrupt("key above fence");
     }
     if (node.leaf) {
@@ -553,7 +615,7 @@ Result<IndexStats> BPlusTree::Validate() {
       stats.entries += node.keys.size();
       leaves.push_back(id);
       for (const auto& e : node.keys) {
-        if (previous && Compare(*previous, e) >= 0)
+        if (previous && CompareEntries(*previous, e) >= 0)
           return Corrupt("leaf order");
         previous = e;
       }

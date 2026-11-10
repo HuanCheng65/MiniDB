@@ -1,7 +1,9 @@
 #include "sql/parser.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <iterator>
 #include <limits>
 #include <utility>
 
@@ -259,7 +261,7 @@ class Parser {
   bool ParseCopy(Statement* statement);
   bool ParsePragma(Statement* statement);
   bool ParsePragmaArgument(Literal* literal);
-  bool ParseWhereClause(std::string* column, std::string* op, Literal* value,
+  bool ParseWhereClause(std::string* column, CompareOp* op, Literal* value,
                         bool* has_where);
   bool ParseShow(Statement* statement);
   bool ParseDescribe(Statement* statement);
@@ -742,18 +744,24 @@ bool Parser::ParsePragmaArgument(Literal* literal) {
   return ParseLiteral(literal);
 }
 
-bool Parser::ParseWhereClause(std::string* column, std::string* op,
+bool Parser::ParseWhereClause(std::string* column, CompareOp* op,
                               Literal* value, bool* has_where) {
   *has_where = false;
   if (!MatchKeyword("WHERE")) return true;
   *has_where = true;
   if (!ExpectIdentifier(column)) return false;
   if (Peek().type != TokenType::kSymbol) return Fail("expected comparison");
-  *op = Peek().text;
-  if (*op != "=" && *op != "<>" && *op != "!=" && *op != "<" && *op != "<=" &&
-      *op != ">" && *op != ">=") {
+  static const std::pair<const char*, CompareOp> kOperators[] = {
+      {"=", CompareOp::kEq}, {"<>", CompareOp::kNe}, {"!=", CompareOp::kNe},
+      {"<", CompareOp::kLt}, {"<=", CompareOp::kLe}, {">", CompareOp::kGt},
+      {">=", CompareOp::kGe}};
+  const auto* found = std::find_if(
+      std::begin(kOperators), std::end(kOperators),
+      [&](const auto& entry) { return Peek().text == entry.first; });
+  if (found == std::end(kOperators)) {
     return Fail("unsupported comparison operator");
   }
+  *op = found->second;
   ++pos_;
   return ParseLiteral(value);
 }

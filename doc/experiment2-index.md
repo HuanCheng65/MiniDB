@@ -10,7 +10,7 @@
 | --- | --- |
 | 索引初始建立 | `CREATE INDEX name ON table(column)` 扫描已有 heap 建树 |
 | 增、删、改 | `INSERT` / `COPY` 插入索引项；`DELETE` 精确删除；`UPDATE` 按旧、新键维护 |
-| 基于索引查找 | `SELECT ... WHERE column = / < / <= / > / >= / != / <> value` 自动选用该列索引，结果消息显示 `INDEX SCAN name` |
+| 基于索引查找 | `SELECT ... WHERE column = / < / <= / > / >= value` 自动选用该列索引，结果消息显示 `INDEX SCAN name`；`!=` / `<>` 几乎命中全表，仍走堆扫描 |
 | 外存及内外存交换 | 每个索引一个 `.idx` 文件，全部节点读写经 BufferPool；小缓冲池测试强制换页 |
 | 两种数据类型 | TPC-H supplier 的 `s_suppkey INTEGER`、`s_name CHAR(25)` |
 | 图形化结构展示 | `PRAGMA index_tree(name)` 输出带分支和叶链箭头的命令行树图；`index_dot` 输出 Graphviz 图源 |
@@ -78,7 +78,7 @@ DROP INDEX supplier_name;
 
 ## 算法与接口
 
-`BPlusTree::Create/Open` 创建或重开文件；`Insert(key, RID)`、`Erase(key, RID)` 维护条目；`Find(key)` 返回等值 RID；`Scan(op, key, visitor)` 支持范围与提前终止；`Validate` 检查结构；`Draw/Dot` 展示树。
+`BPlusTree::Create/Open` 创建或重开文件；`BulkLoad(entries)` 供 `CREATE INDEX` 使用：对全部条目排序后自底向上逐层写页（节点预留 1/8 空间）；`Insert(key, RID)`、`Erase(key, RID)` 维护条目；`Find(key)` 返回等值 RID；`Scan(CompareOp, key, visitor)` 支持范围与提前终止；`Validate` 检查结构；`Draw/Dot` 展示树。
 
 插入从根沿分隔键二分定位，叶节点按 `(key, RID)` 有序插入。叶满时对半分裂并连接叶链，将右叶首键复制到父节点；内部节点分裂将中间键提升。分裂逐层传播，根分裂时创建新根。
 

@@ -79,6 +79,7 @@ struct PragmaContext {
   const PragmaSpec& spec;
   Catalog& catalog;
   BufferPool& pool;
+  const std::map<std::string, std::unique_ptr<BPlusTree>>& indexes;
   Transaction* txn;
   QueryResult* result;
 
@@ -91,6 +92,14 @@ struct PragmaContext {
   }
   Result<TableInfo*> TableArg(size_t index) const {
     return catalog.GetTable(spec.args[index].text);
+  }
+  Result<BPlusTree*> IndexArg(size_t index) const {
+    const auto found = indexes.find(ToLower(spec.args[index].text));
+    if (found == indexes.end()) {
+      return Status(StatusCode::kNotFound,
+                    "index not found: " + spec.args[index].text);
+    }
+    return found->second.get();
   }
   Result<page_id_t> PageArg(size_t index) const {
     const Literal& literal = spec.args[index];
@@ -511,6 +520,74 @@ struct PragmaEntry {
   Status (*run)(PragmaContext&);
 };
 
+Status IndexesPragma(PragmaContext& ctx) {
+  if (ctx.spec.has_value || ctx.spec.args.size() > 1) {
+    return Status(StatusCode::kInvalidArgument,
+                  "usage: PRAGMA indexes[(table)]");
+  }
+  SetColumns(ctx.result, {{"index", TypeId::kVarchar},
+                          {"table", TypeId::kVarchar},
+                          {"column", TypeId::kVarchar},
+                          {"type", TypeId::kVarchar},
+                          {"entries", TypeId::kInt64}});
+  for (const auto& [name, tree] : ctx.indexes) {
+    const IndexMetadata& m = tree->metadata();
+    if (!ctx.spec.args.empty() && ToLower(ctx.spec.args[0].text) != m.table) {
+      continue;
+    }
+    auto table = ctx.catalog.GetTable(m.table);
+    if (!table.ok()) return table.status();
+    const Schema& schema = table.value()->schema;
+    ctx.result->rows.push_back({Text(name), Text(m.table),
+                                Text(schema.GetColumn(m.column).name),
+                                Text(schema.TypeName(m.column)),
+                                Int(static_cast<int64_t>(tree->size()))});
+  }
+  return Status::Ok();
+}
+
+// Walks the whole tree checking every invariant, then reports its shape.
+Status IndexCheckPragma(PragmaContext& ctx) {
+  const Status args = ctx.ArgCount(1, "index_check(index)");
+  if (!args.ok()) return args;
+  auto tree = ctx.IndexArg(0);
+  if (!tree.ok()) return tree.status();
+  auto stats = tree.value()->Validate();
+  if (!stats.ok()) return stats.status();
+  const IndexStats& s = stats.value();
+  SetColumns(ctx.result, {{"valid", TypeId::kVarchar},
+                          {"entries", TypeId::kInt64},
+                          {"height", TypeId::kInt32},
+                          {"nodes", TypeId::kInt32},
+                          {"leaves", TypeId::kInt32},
+                          {"free_pages", TypeId::kInt32},
+                          {"capacity", TypeId::kInt32},
+                          {"root", TypeId::kInt64}});
+  ctx.result->rows.push_back(
+      {Text("ok"), Int(static_cast<int64_t>(s.entries)), Value::Int32(s.height),
+       Value::Int32(s.nodes), Value::Int32(s.leaves),
+       Value::Int32(s.free_pages), Value::Int32(s.capacity), Int(s.root)});
+  return Status::Ok();
+}
+
+Status IndexDrawing(PragmaContext& ctx, const char* name, bool dot) {
+  const Status args = ctx.ArgCount(1, (std::string(name) + "(index)").c_str());
+  if (!args.ok()) return args;
+  auto tree = ctx.IndexArg(0);
+  if (!tree.ok()) return tree.status();
+  auto drawing = dot ? tree.value()->Dot() : tree.value()->Draw();
+  if (!drawing.ok()) return drawing.status();
+  SetColumns(ctx.result, {{name, TypeId::kVarchar}});
+  ctx.result->rows.push_back({Text(drawing.TakeValue())});
+  return Status::Ok();
+}
+Status IndexTreePragma(PragmaContext& ctx) {
+  return IndexDrawing(ctx, "index_tree", false);
+}
+Status IndexDotPragma(PragmaContext& ctx) {
+  return IndexDrawing(ctx, "index_dot", true);
+}
+
 constexpr PragmaEntry kPragmas[] = {
     {"pragma_list", "", "this list", &PragmaList},
     {"buffer_stats", "", "buffer pool counters and hit rate",
@@ -531,6 +608,13 @@ constexpr PragmaEntry kPragmas[] = {
      &PageHeaderPragma},
     {"page_slots", "table, page_id", "slot directory of a heap page",
      &PageSlotsPragma},
+    {"indexes", "[table]", "B+ tree indexes: table, column, type, entries",
+     &IndexesPragma},
+    {"index_check", "index", "verify all tree invariants and report its shape",
+     &IndexCheckPragma},
+    {"index_stats", "index", "same as index_check", &IndexCheckPragma},
+    {"index_tree", "index", "draw the tree as indented text", &IndexTreePragma},
+    {"index_dot", "index", "the tree as Graphviz DOT source", &IndexDotPragma},
     {"flush", "", "write all dirty pages and fsync", &FlushPragma},
     {"log_level", "[= level]", "show or set debug|info|warn|error|off",
      &LogLevelPragma},
@@ -542,11 +626,6 @@ Status PragmaList(PragmaContext& ctx) {
   SetColumns(ctx.result, {{"name", TypeId::kVarchar},
                           {"arguments", TypeId::kVarchar},
                           {"description", TypeId::kVarchar}});
-  for (const auto* name :
-       {"indexes", "index_stats", "index_check", "index_tree", "index_dot"})
-    ctx.result->rows.push_back(
-        {Text(name), Text(name == std::string("indexes") ? "[table]" : "index"),
-         Text("B+ tree index introspection")});
   for (const PragmaEntry& entry : kPragmas) {
     ctx.result->rows.push_back(
         {Text(entry.name), Text(entry.arguments), Text(entry.description)});
@@ -558,11 +637,9 @@ Status PragmaList(PragmaContext& ctx) {
 
 Status Database::ExecutePragma(Statement* statement, Transaction* txn,
                                QueryResult* result) {
-  PragmaContext ctx{statement->pragma, *catalog_, *pool_, txn, result};
+  PragmaContext ctx{statement->pragma, *catalog_, *pool_,
+                    indexes_,          txn,       result};
   const std::string name = ToLower(statement->pragma.name);
-  if (name == "indexes" || name == "index_stats" || name == "index_check" ||
-      name == "index_tree" || name == "index_dot")
-    return ExecuteIndexPragma(statement, result);
   for (const PragmaEntry& entry : kPragmas) {
     if (name == entry.name) return entry.run(ctx);
   }

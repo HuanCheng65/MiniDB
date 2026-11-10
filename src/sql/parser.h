@@ -10,6 +10,7 @@
 
 #include "common/status.h"
 #include "record/schema.h"
+#include "record/value.h"
 
 namespace minidb {
 
@@ -37,7 +38,7 @@ struct SelectSpec {
   std::vector<std::string> columns;  // may contain "*" next to column names
   bool star = false;
   std::string where_column;
-  std::string where_op;
+  CompareOp where_op = CompareOp::kEq;
   Literal where_value;
   bool has_where = false;
   int64_t limit = -1;
@@ -45,7 +46,7 @@ struct SelectSpec {
 
 struct DeleteSpec {
   std::string where_column;
-  std::string where_op;
+  CompareOp where_op = CompareOp::kEq;
   Literal where_value;
   bool has_where = false;
 };
@@ -58,7 +59,7 @@ struct Assignment {
 struct UpdateSpec {
   std::vector<Assignment> assignments;
   std::string where_column;
-  std::string where_op;
+  CompareOp where_op = CompareOp::kEq;
   Literal where_value;
   bool has_where = false;
 };

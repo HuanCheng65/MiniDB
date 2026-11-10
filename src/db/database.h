@@ -83,7 +83,6 @@ class Database {
   Status LoadIndexes();
   Status ExecuteCreateIndex(Statement*, Transaction*, QueryResult*);
   Status ExecuteDropIndex(Statement*, QueryResult*);
-  Status ExecuteIndexPragma(Statement*, QueryResult*);
   Status DropIndex(const std::string& name);
   Status DropTableIndexes(const TableInfo& table);
   BPlusTree* FindIndex(const TableInfo& table, size_t column);

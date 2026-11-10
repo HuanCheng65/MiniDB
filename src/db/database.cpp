@@ -115,16 +115,9 @@ Result<Value> LiteralToValue(const Literal& literal, const Column& column) {
   return Status(StatusCode::kTypeMismatch, "unsupported column type");
 }
 
-bool Matches(const Value& value, const std::string& op, const Value& literal) {
+bool Matches(const Value& value, CompareOp op, const Value& literal) {
   if (value.IsNull() || literal.IsNull()) return false;
-  const int cmp = CompareValues(value, literal);
-  if (op == "=") return cmp == 0;
-  if (op == "<>" || op == "!=") return cmp != 0;
-  if (op == "<") return cmp < 0;
-  if (op == "<=") return cmp <= 0;
-  if (op == ">") return cmp > 0;
-  if (op == ">=") return cmp >= 0;
-  return false;
+  return Satisfies(CompareValues(value, literal), op);
 }
 
 void AppendMessage(QueryResult* result, const std::string& message) {
@@ -651,7 +644,7 @@ Status Database::ExecuteSelect(Statement* statement, Transaction* txn,
 
   // WHERE rid = 'page:slot' is a direct lookup instead of a scan.
   if (spec.has_where && is_rid(spec.where_column)) {
-    if (spec.where_op != "=" ||
+    if (spec.where_op != CompareOp::kEq ||
         spec.where_value.kind != Literal::Kind::kString) {
       return Status(StatusCode::kInvalidArgument,
                     "only rid = 'page:slot' is supported");
@@ -691,7 +684,9 @@ Status Database::ExecuteSelect(Statement* statement, Transaction* txn,
     }
   }
 
-  if (where_index >= 0) {
+  // "<>" matches almost every row: a heap scan beats one random heap read per
+  // index entry, so only the other operators use an index.
+  if (where_index >= 0 && spec.where_op != CompareOp::kNe) {
     if (auto* index = FindIndex(*table, static_cast<size_t>(where_index))) {
       result->message = "INDEX SCAN " + index->metadata().name;
       if (spec.limit == 0) return Status::Ok();
@@ -709,9 +704,7 @@ Status Database::ExecuteSelect(Statement* statement, Transaction* txn,
               lookup_status = values.status();
               return false;
             }
-            if (Matches(values.value()[where_index], spec.where_op,
-                        where_value))
-              emit(entry.rid, values.value());
+            emit(entry.rid, values.value());
             return spec.limit < 0 ||
                    static_cast<int64_t>(result->rows.size()) < spec.limit;
           });

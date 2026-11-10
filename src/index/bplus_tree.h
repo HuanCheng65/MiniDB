@@ -44,10 +44,15 @@ class BPlusTree {
       BufferPool& pool, const std::string& path, const IndexMetadata& metadata);
   static Result<std::unique_ptr<BPlusTree>> Open(BufferPool& pool,
                                                  const std::string& path);
+  // Builds an empty tree bottom-up from all entries at once (CREATE INDEX):
+  // sorted in memory, then written level by level, far cheaper than one
+  // root-to-leaf insert per entry. NULL keys are skipped, as in Insert.
+  Status BulkLoad(std::vector<IndexEntry> entries);
   Status Insert(const Value& key, RID rid);
   Status Erase(const Value& key, RID rid);
-  // Operators: =, <, <=, >, >=, !=, <>. Visitor can stop early (LIMIT).
-  Status Scan(const std::string& op, const Value& key,
+  // Visits matching entries in key order; the visitor returns false to stop
+  // early (LIMIT).
+  Status Scan(CompareOp op, const Value& key,
               const std::function<bool(const IndexEntry&)>& visitor);
   Result<std::vector<RID>> Find(const Value& key);
   Result<IndexStats> Validate();
@@ -71,7 +76,6 @@ class BPlusTree {
     page_id_t right;
   };
   BPlusTree(BufferPool& pool, DiskManager::Ptr disk, IndexMetadata metadata);
-  static int Compare(const IndexEntry& a, const IndexEntry& b);
   Status CheckKey(const Value& key) const;
   Result<Node> Read(page_id_t id);
   Status Write(const Node& node);
@@ -82,7 +86,8 @@ class BPlusTree {
                                           const IndexEntry& entry);
   Status EraseNode(page_id_t id, const IndexEntry& entry);
   Status Rebalance(Node* parent, size_t child);
-  Result<page_id_t> FindLeaf(const IndexEntry& entry);
+  // Leaf that would hold `entry`; the leftmost leaf when it is null.
+  Result<page_id_t> FindLeaf(const IndexEntry* entry);
 
   BufferPool& pool_;
   DiskManager::Ptr disk_;
