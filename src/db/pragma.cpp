@@ -80,6 +80,7 @@ struct PragmaContext {
   Catalog& catalog;
   BufferPool& pool;
   const std::map<std::string, std::unique_ptr<BPlusTree>>& indexes;
+  size_t& index_sort_memory;
   Transaction* txn;
   QueryResult* result;
 
@@ -520,6 +521,27 @@ struct PragmaEntry {
   Status (*run)(PragmaContext&);
 };
 
+// Kilobytes CREATE INDEX may sort in before it spills sorted runs to disk.
+Status IndexSortMemoryPragma(PragmaContext& ctx) {
+  if (!ctx.spec.args.empty()) {
+    return Status(StatusCode::kInvalidArgument,
+                  "usage: PRAGMA index_sort_memory [= kilobytes]");
+  }
+  if (ctx.spec.has_value) {
+    const Literal& value = ctx.spec.value;
+    if (value.kind != Literal::Kind::kInteger || value.integer < 1 ||
+        value.integer > (int64_t{1} << 30)) {
+      return Status(StatusCode::kInvalidArgument,
+                    "index_sort_memory must be a positive number of KB");
+    }
+    ctx.index_sort_memory = static_cast<size_t>(value.integer) * 1024;
+  }
+  SetColumns(ctx.result, {{"index_sort_memory_kb", TypeId::kInt64}});
+  ctx.result->rows.push_back(
+      {Int(static_cast<int64_t>(ctx.index_sort_memory / 1024))});
+  return Status::Ok();
+}
+
 Status IndexesPragma(PragmaContext& ctx) {
   if (ctx.spec.has_value || ctx.spec.args.size() > 1) {
     return Status(StatusCode::kInvalidArgument,
@@ -615,6 +637,9 @@ constexpr PragmaEntry kPragmas[] = {
     {"index_stats", "index", "same as index_check", &IndexCheckPragma},
     {"index_tree", "index", "draw the tree as indented text", &IndexTreePragma},
     {"index_dot", "index", "the tree as Graphviz DOT source", &IndexDotPragma},
+    {"index_sort_memory", "[= kilobytes]",
+     "memory CREATE INDEX sorts in before spilling runs to disk",
+     &IndexSortMemoryPragma},
     {"flush", "", "write all dirty pages and fsync", &FlushPragma},
     {"log_level", "[= level]", "show or set debug|info|warn|error|off",
      &LogLevelPragma},
@@ -637,8 +662,8 @@ Status PragmaList(PragmaContext& ctx) {
 
 Status Database::ExecutePragma(Statement* statement, Transaction* txn,
                                QueryResult* result) {
-  PragmaContext ctx{statement->pragma, *catalog_, *pool_,
-                    indexes_,          txn,       result};
+  PragmaContext ctx{statement->pragma,         *catalog_, *pool_, indexes_,
+                    config_.index_sort_memory, txn,       result};
   const std::string name = ToLower(statement->pragma.name);
   for (const PragmaEntry& entry : kPragmas) {
     if (name == entry.name) return entry.run(ctx);

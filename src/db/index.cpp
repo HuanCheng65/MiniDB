@@ -100,8 +100,9 @@ Status Database::ExecuteCreateIndex(Statement* statement, Transaction* txn,
     fs::remove(temporary, ignored);
     return failure;
   };
+  size_t sort_runs = 0;
   {
-    std::vector<IndexEntry> entries;
+    BPlusTree::BulkLoader loader(*tree, config_.index_sort_memory);
     auto iterator = table->heap->Scan(txn);
     RID rid;
     Tuple tuple;
@@ -109,11 +110,13 @@ Status Database::ExecuteCreateIndex(Statement* statement, Transaction* txn,
       auto values =
           Tuple::Decode(table->schema, tuple.data().data(), tuple.size());
       if (!values.ok()) return cleanup(values.status());
-      entries.push_back({std::move(values.value()[ordinal]), rid});
+      s = loader.Add(values.value()[ordinal], rid);
+      if (!s.ok()) return cleanup(s);
     }
     if (!iterator.status().ok()) return cleanup(iterator.status());
-    s = tree->BulkLoad(std::move(entries));
+    s = loader.Finish();
     if (!s.ok()) return cleanup(s);
+    sort_runs = loader.runs();
   }
   const auto count = tree->size();
   s = pool_->FlushAll();
@@ -127,7 +130,11 @@ Status Database::ExecuteCreateIndex(Statement* statement, Transaction* txn,
   if (!opened.ok()) return opened.status();
   indexes_.emplace(name, opened.TakeValue());
   result->message = "CREATE INDEX " + name + " (B+ tree, " +
-                    std::to_string(count) + " entries)";
+                    std::to_string(count) + " entries, " +
+                    (sort_runs ? "external sort: " + std::to_string(sort_runs) +
+                                     " runs merged"
+                               : std::string("sorted in memory")) +
+                    ")";
   return Status::Ok();
 }
 

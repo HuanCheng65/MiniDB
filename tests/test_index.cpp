@@ -175,52 +175,71 @@ void BulkLoad() {
   BufferPool pool(log, BufferConfig{4, "clock"});
   int file = 0;
   // Length 4000 gives capacity 2; length 250 capacity 30; integers 450.
-  for (const int length : {4000, 250, 0}) {
-    const bool strings = length != 0;
-    const IndexMetadata m{"b",
-                          "t",
-                          3,
-                          0,
-                          strings ? TypeId::kVarchar : TypeId::kInt64,
-                          static_cast<uint16_t>(length)};
-    const auto capacity = [&] {
-      auto probe = Take(BPlusTree::Create(
-          pool, dir + "/probe" + std::to_string(length) + ".idx", m));
-      return static_cast<int>(Take(probe->Validate()).capacity);
-    }();
-    const int fill = capacity - capacity / 8;
-    for (const int count :
-         {0, 1, capacity / 2, fill, fill + 1, capacity, capacity + 1,
-          2 * fill + 1, fill * (fill + 1) + 1, strings ? 700 : 30000}) {
-      if (count > 30000) continue;
-      auto tree = Take(BPlusTree::Create(
-          pool, dir + "/" + std::to_string(file++) + ".idx", m));
-      std::vector<IndexEntry> entries;
-      std::set<int> active;
-      for (int i = count - 1; i >= 0; --i) {
-        entries.push_back({Key(i, strings), Rid(i)});
-        active.insert(i);
+  // A 2 KB sort budget spills hundreds of runs; the default sorts in memory.
+  for (const size_t memory : {BPlusTree::kDefaultSortMemory, size_t{2048}})
+    for (const int length : {4000, 250, 0}) {
+      const bool strings = length != 0;
+      const IndexMetadata m{"b",
+                            "t",
+                            3,
+                            0,
+                            strings ? TypeId::kVarchar : TypeId::kInt64,
+                            static_cast<uint16_t>(length)};
+      const auto capacity = [&] {
+        auto probe = Take(BPlusTree::Create(
+            pool, dir + "/probe" + std::to_string(file++) + ".idx", m));
+        return static_cast<int>(Take(probe->Validate()).capacity);
+      }();
+      const int fill = capacity - capacity / 8;
+      for (const int count :
+           {0, 1, capacity / 2, fill, fill + 1, capacity, capacity + 1,
+            2 * fill + 1, fill * (fill + 1) + 1, strings ? 700 : 30000}) {
+        if (count > 30000) continue;
+        auto tree = Take(BPlusTree::Create(
+            pool, dir + "/" + std::to_string(file++) + ".idx", m));
+        std::vector<IndexEntry> entries;
+        std::set<int> active;
+        for (int i = count - 1; i >= 0; --i) {
+          entries.push_back({Key(i, strings), Rid(i)});
+          active.insert(i);
+        }
+        entries.push_back({Value::Null(), Rid(count)});
+        Ok(tree->BulkLoad(std::move(entries), memory));
+        CheckModel(*tree, active, strings, count / 2);
+        // Only an empty tree can be bulk loaded.
+        if (count > 0)
+          REQUIRE(!tree->BulkLoad({{Key(0, strings), Rid(0)}}).ok());
+        for (int i = count; i < count + 40; ++i) {
+          Ok(tree->Insert(Key(i, strings), Rid(i)));
+          active.insert(i);
+        }
+        for (int i = 0; i < count; i += 2) {
+          Ok(tree->Erase(Key(i, strings), Rid(i)));
+          active.erase(i);
+        }
+        CheckModel(*tree, active, strings, count / 3);
       }
-      entries.push_back({Value::Null(), Rid(count)});
-      Ok(tree->BulkLoad(std::move(entries)));
-      CheckModel(*tree, active, strings, count / 2);
-      // Only an empty tree can be bulk loaded.
-      if (count > 0) REQUIRE(!tree->BulkLoad({{Key(0, strings), Rid(0)}}).ok());
-      for (int i = count; i < count + 40; ++i) {
-        Ok(tree->Insert(Key(i, strings), Rid(i)));
-        active.insert(i);
-      }
-      for (int i = 0; i < count; i += 2) {
-        Ok(tree->Erase(Key(i, strings), Rid(i)));
-        active.erase(i);
-      }
-      CheckModel(*tree, active, strings, count / 3);
     }
-  }
   auto tree = Take(BPlusTree::Create(pool, dir + "/dup.idx",
                                      {"d", "t", 3, 0, TypeId::kInt64, 0}));
   REQUIRE(
       !tree->BulkLoad({{Key(1, false), Rid(1)}, {Key(1, false), Rid(1)}}).ok());
+  // The same entry twice is caught even when the copies are in different
+  // runs (a 16-byte budget has room for one entry at a time).
+  tree = Take(BPlusTree::Create(pool, dir + "/dup2.idx",
+                                {"d", "t", 3, 0, TypeId::kInt64, 0}));
+  REQUIRE(!tree->BulkLoad({{Key(1, false), Rid(1)},
+                           {Key(2, false), Rid(2)},
+                           {Key(1, false), Rid(1)}},
+                          16)
+               .ok());
+  {
+    BPlusTree::BulkLoader loader(*tree, 16);
+    for (int i = 0; i < 5; ++i) Ok(loader.Add(Key(i, false), Rid(i)));
+    REQUIRE(loader.runs() == 4);  // the fifth is still in memory
+    REQUIRE(std::filesystem::exists(dir + "/dup2.idx.sort"));
+  }
+  REQUIRE(!std::filesystem::exists(dir + "/dup2.idx.sort"));
   std::filesystem::remove_all(dir);
 }
 
@@ -410,9 +429,7 @@ void DmlThroughIndex() {
   config.buffer_pool_frames = 8;
   config.log_level = "off";
   auto db = Take(Database::Open(config));
-  for (const std::string table : {"plain", "indexed"}) {
-    Exec(*db, "CREATE TABLE " + table +
-                  " (id INTEGER, k INTEGER, s CHAR(12), v VARCHAR(4000));");
+  const auto insert_rows = [](const std::string& table) {
     std::string insert = "INSERT INTO " + table + " VALUES ";
     for (int i = 0; i < 1500; ++i) {
       if (i) insert += ',';
@@ -422,7 +439,12 @@ void DmlThroughIndex() {
           (i % 13 == 0 ? "NULL" : "'name" + std::to_string(i % 10) + "'") +
           ",'x')";
     }
-    Exec(*db, insert);
+    return insert;
+  };
+  for (const std::string table : {"plain", "indexed"}) {
+    Exec(*db, "CREATE TABLE " + table +
+                  " (id INTEGER, k INTEGER, s CHAR(12), v VARCHAR(4000));");
+    Exec(*db, insert_rows(table));
   }
   // Rows that outgrow their page are forwarded but keep their RID.
   const std::string grow = " SET v = '" + std::string(2500, 'x') + "' WHERE ";
@@ -470,6 +492,18 @@ void DmlThroughIndex() {
     Exec(*db, "PRAGMA index_check(i_s)");
   }
   REQUIRE(Exec(*db, "SELECT * FROM indexed").rows.empty());
+
+  // CREATE INDEX under a tiny sort budget goes through the external merge
+  // and must produce an index that answers like a heap scan.
+  Exec(*db, insert_rows("indexed"));
+  Exec(*db, "DROP INDEX ik; PRAGMA index_sort_memory = 1;");
+  const auto built = Exec(*db, "CREATE INDEX ik ON indexed(k)");
+  REQUIRE(built.message.find("external sort") != std::string::npos);
+  Exec(*db, "PRAGMA index_check(ik)");
+  Exec(*db, insert_rows("plain"));
+  for (const std::string where : {"k = 7", "k >= 90", "k < 5"})
+    REQUIRE(Rows(Exec(*db, "SELECT * FROM plain WHERE " + where)) ==
+            Rows(Exec(*db, "SELECT * FROM indexed WHERE " + where)));
   Ok(db->Close());
   std::filesystem::remove_all(dir);
 }

@@ -25,6 +25,8 @@ struct Config {
   std::string replacer = "clock";
   std::string log_level = "info";
   std::string log_file;
+  // Memory CREATE INDEX may sort in before spilling sorted runs to disk.
+  size_t index_sort_memory = BPlusTree::kDefaultSortMemory;
 };
 
 struct QueryColumn {

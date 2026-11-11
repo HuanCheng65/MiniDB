@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <queue>
 #include <set>
@@ -58,9 +60,87 @@ int CompareEntries(const IndexEntry& a, const IndexEntry& b) {
   const int key = CompareValues(a.key, b.key);
   return key ? key : CompareRids(a.rid, b.rid);
 }
-bool EntryLess(const IndexEntry& a, const IndexEntry& b) {
-  return CompareEntries(a, b) < 0;
+// A sort record is an index entry in the order it is added: the key as a slot
+// stores it but without padding ([u16 length][bytes], or an int64), then the
+// RID. Records are what the bulk loader sorts, spills and merges.
+size_t RecordBytes(bool strings, const std::byte* record) {
+  return (strings ? 2 + ReadU16(record, 0) : sizeof(int64_t)) + kRidBytes;
 }
+std::string_view RecordString(const std::byte* record) {
+  return {reinterpret_cast<const char*>(record + 2), ReadU16(record, 0)};
+}
+int64_t RecordInteger(const std::byte* record) {
+  int64_t value;
+  std::memcpy(&value, record, sizeof(value));
+  return value;
+}
+RID RecordRid(bool strings, const std::byte* record) {
+  const std::byte* rid = record + RecordBytes(strings, record) - kRidBytes;
+  return {ReadU32(rid, 0), ReadU16(rid, 4)};
+}
+// (key, RID) order, agreeing with CompareEntries.
+int CompareRecords(bool strings, const std::byte* a, const std::byte* b) {
+  int key;
+  if (strings) {
+    key = TrimmedRight(RecordString(a)).compare(TrimmedRight(RecordString(b)));
+  } else {
+    const int64_t x = RecordInteger(a), y = RecordInteger(b);
+    key = x < y ? -1 : x > y ? 1 : 0;
+  }
+  return key ? key : CompareRids(RecordRid(strings, a), RecordRid(strings, b));
+}
+
+// One sorted run in the bulk loader's temporary file, read through a buffer.
+// All runs share one file handle, so the number of runs is not limited by
+// open files.
+class RunReader {
+ public:
+  RunReader(uint64_t offset, uint64_t bytes) : offset_(offset), left_(bytes) {}
+
+  // The record at the front of the run; null once the run is exhausted.
+  const std::byte* current() const { return current_; }
+  Status Advance(std::ifstream& file, bool strings) {
+    current_ = nullptr;
+    if (begin_ == end_ && left_ == 0) return Status::Ok();
+    auto status = Fill(file, strings ? 2 : sizeof(int64_t));
+    if (!status.ok()) return status;
+    const size_t size = RecordBytes(strings, buffer_.data() + begin_);
+    status = Fill(file, size);
+    if (!status.ok()) return status;
+    current_ = buffer_.data() + begin_;
+    begin_ += size;
+    return Status::Ok();
+  }
+
+ private:
+  // Makes at least `need` unread bytes available at begin_.
+  Status Fill(std::ifstream& file, size_t need) {
+    if (end_ - begin_ >= need) return Status::Ok();
+    if (buffer_.empty()) buffer_.resize(kBufferBytes);
+    std::memmove(buffer_.data(), buffer_.data() + begin_, end_ - begin_);
+    end_ -= begin_;
+    begin_ = 0;
+    const size_t wanted =
+        static_cast<size_t>(std::min<uint64_t>(buffer_.size() - end_, left_));
+    file.seekg(static_cast<std::streamoff>(offset_));
+    file.read(reinterpret_cast<char*>(buffer_.data() + end_),
+              static_cast<std::streamsize>(wanted));
+    if (!file || end_ + wanted < need)
+      return Status(StatusCode::kIoError, "cannot read index sort run");
+    offset_ += wanted;
+    left_ -= wanted;
+    end_ += wanted;
+    return Status::Ok();
+  }
+
+  static constexpr size_t kBufferBytes = 64 * 1024;  // above the longest record
+  uint64_t offset_;  // of the next unread byte in the file
+  uint64_t left_;    // bytes of this run not yet read from the file
+  std::vector<std::byte> buffer_;
+  size_t begin_ = 0, end_ = 0;
+  const std::byte* current_ = nullptr;
+};
+
 // Splits `count` items into the fewest groups of at most `target` items, then
 // drops groups while an even split would leave them below `minimum`.
 size_t GroupCount(size_t count, size_t target, size_t minimum) {
@@ -485,77 +565,254 @@ Status BPlusTree::Insert(const Value& key, RID rid) {
   return SaveMetadata();
 }
 
-Status BPlusTree::BulkLoad(std::vector<IndexEntry> entries) {
+BPlusTree::BulkLoader::BulkLoader(BPlusTree& tree, size_t memory_bytes)
+    : tree_(tree),
+      // Record offsets are 32-bit, which caps one in-memory batch.
+      memory_bytes_(std::min<size_t>(memory_bytes, size_t{1} << 31)),
+      temp_path_(tree.disk_->path() + ".sort") {}
+
+BPlusTree::BulkLoader::~BulkLoader() {
+  std::error_code ignored;
+  if (!runs_.empty()) std::filesystem::remove(temp_path_, ignored);
+}
+
+Status BPlusTree::BulkLoader::Add(const Value& key, RID rid) {
+  auto status = tree_.CheckKey(key);
+  if (!status.ok() || key.IsNull()) return status;
+  if (rid.page_id == kInvalidPageId)
+    return Status(StatusCode::kInvalidArgument, "invalid RID");
+  // The budget is split between record bytes and record offsets and both
+  // buffers are allocated once, so memory never exceeds it: when the next
+  // record does not fit, the batch is spilled first.
+  if (arena_.capacity() == 0) {
+    arena_.reserve(std::max(memory_bytes_ / 4 * 3, kMaxKeyBytes + kRidBytes));
+    offsets_.reserve(std::max<size_t>(memory_bytes_ / 4 / sizeof(uint32_t), 1));
+  }
+  const size_t key_bytes =
+      tree_.string_keys_ ? 2 + key.string_value.size() : sizeof(int64_t);
+  if (arena_.size() + key_bytes + kRidBytes > arena_.capacity() ||
+      offsets_.size() == offsets_.capacity()) {
+    status = Spill();
+    if (!status.ok()) return status;
+  }
+  offsets_.push_back(static_cast<uint32_t>(arena_.size()));
+  const auto append = [&](const void* data, size_t size) {
+    const auto* bytes = static_cast<const std::byte*>(data);
+    arena_.insert(arena_.end(), bytes, bytes + size);
+  };
+  if (tree_.string_keys_) {
+    const auto length = static_cast<uint16_t>(key.string_value.size());
+    append(&length, sizeof(length));
+    append(key.string_value.data(), length);
+  } else {
+    const int64_t value = IntegerOf(key);
+    append(&value, sizeof(value));
+  }
+  append(&rid.page_id, sizeof(rid.page_id));
+  append(&rid.slot, sizeof(rid.slot));
+  ++count_;
+  return Status::Ok();
+}
+
+void BPlusTree::BulkLoader::Sort() {
+  std::sort(offsets_.begin(), offsets_.end(), [&](uint32_t a, uint32_t b) {
+    return CompareRecords(tree_.string_keys_, arena_.data() + a,
+                          arena_.data() + b) < 0;
+  });
+}
+
+// Writes the buffered records to the temporary file as one sorted run.
+Status BPlusTree::BulkLoader::Spill() {
+  Sort();
+  std::ofstream file(
+      temp_path_,
+      std::ios::binary | (runs_.empty() ? std::ios::trunc : std::ios::app));
+  uint64_t bytes = 0;
+  for (const uint32_t offset : offsets_) {
+    const std::byte* record = arena_.data() + offset;
+    const size_t size = RecordBytes(tree_.string_keys_, record);
+    file.write(reinterpret_cast<const char*>(record),
+               static_cast<std::streamsize>(size));
+    bytes += size;
+  }
+  file.close();
+  if (!file) return Status(StatusCode::kIoError, "cannot write index sort run");
+  runs_.push_back({spilled_bytes_, bytes});
+  spilled_bytes_ += bytes;
+  arena_.clear();
+  offsets_.clear();
+  return Status::Ok();
+}
+
+Status BPlusTree::BulkLoader::Finish() {
+  if (tree_.entries_ != 0)
+    return Status(StatusCode::kInvalidArgument,
+                  "bulk load needs an empty tree");
+  if (count_ == 0) return Status::Ok();
+  if (runs_.empty()) {
+    // Everything fit in memory: one sort, no temporary file.
+    Sort();
+    size_t next = 0;
+    return Build([&](const std::byte** record) {
+      *record =
+          next < offsets_.size() ? arena_.data() + offsets_[next++] : nullptr;
+      return Status::Ok();
+    });
+  }
+  if (!offsets_.empty()) {
+    auto status = Spill();
+    if (!status.ok()) return status;
+  }
+  arena_ = {};
+  offsets_ = {};
+
+  // K-way merge: a heap holds the runs ordered by their front record.
+  const bool strings = tree_.string_keys_;
+  std::ifstream file(temp_path_, std::ios::binary);
+  std::vector<RunReader> readers;
+  for (const Run& run : runs_) readers.emplace_back(run.offset, run.bytes);
+  const auto later = [&](size_t a, size_t b) {
+    return CompareRecords(strings, readers[a].current(), readers[b].current()) >
+           0;
+  };
+  std::priority_queue<size_t, std::vector<size_t>, decltype(later)> heap(later);
+  for (size_t i = 0; i < readers.size(); ++i) {
+    auto status = readers[i].Advance(file, strings);
+    if (!status.ok()) return status;
+    if (readers[i].current()) heap.push(i);
+  }
+  bool started = false;
+  return Build([&](const std::byte** record) {
+    if (started) {
+      // The record handed out last time has been consumed: move its run on.
+      const size_t run = heap.top();
+      heap.pop();
+      auto status = readers[run].Advance(file, strings);
+      if (!status.ok()) return status;
+      if (readers[run].current()) heap.push(run);
+    }
+    started = true;
+    *record = heap.empty() ? nullptr : readers[heap.top()].current();
+    return Status::Ok();
+  });
+}
+
+// Writes the tree bottom-up from the sorted record stream `next`. The entry
+// count is known, so the size of every node on every level is planned up
+// front and only one node per level is in memory: a leaf fills, is written,
+// and hands its page and lowest entry to the level above, which fills the
+// same way.
+Status BPlusTree::BulkLoader::Build(
+    const std::function<Status(const std::byte**)>& next) {
+  BPlusTree& tree = tree_;
+  // Leave an eighth of each node free so the first inserts do not split.
+  const size_t fill = tree.capacity_ - tree.capacity_ / 8;
+  struct Level {
+    explicit Level(const BPlusTree& tree) : node(tree) {}
+    Node node;          // the node being filled
+    size_t items = 0;   // entries (leaves) or children (internal) on the level
+    size_t nodes = 0;   // nodes the items are spread over
+    size_t index = 0;   // which node is being filled
+    size_t filled = 0;  // items in it so far
+    IndexEntry lowest;  // its lowest entry: the separator its parent stores
+    page_id_t reserved = kInvalidPageId;  // page for the next node, if chosen
+  };
+  std::vector<std::unique_ptr<Level>> levels;
+  for (size_t items = count_;; items = levels.back()->nodes) {
+    auto level = std::make_unique<Level>(tree);
+    level->items = items;
+    level->nodes = levels.empty()
+                       ? GroupCount(items, fill, tree.capacity_ / 2)
+                       : GroupCount(items, fill + 1, tree.capacity_ / 2 + 1);
+    levels.push_back(std::move(level));
+    if (levels.back()->nodes == 1) break;  // the root
+  }
+  levels[0]->reserved = tree.root_;  // reuse the empty root page of Create()
+
+  // Puts one item into the node being filled on level `at`; a full node is
+  // written and becomes an item of the level above.
+  std::function<Status(size_t, const IndexEntry&, page_id_t)> add;
+  add = [&](size_t at, const IndexEntry& entry, page_id_t child) -> Status {
+    Level& level = *levels[at];
+    const bool leaf = at == 0;
+    if (level.filled == 0) {
+      page_id_t id = level.reserved;
+      if (id == kInvalidPageId) {
+        auto allocated = tree.Allocate();
+        if (!allocated.ok()) return allocated.status();
+        id = allocated.value();
+      }
+      level.reserved = kInvalidPageId;
+      level.node.Reset(id, leaf);
+      level.lowest = entry;
+    }
+    if (leaf)
+      level.node.Append(entry);
+    else if (level.filled == 0)
+      level.node.set_first_child(child);
+    else
+      level.node.Append(entry, child);
+    const size_t planned =
+        level.items / level.nodes + (level.index < level.items % level.nodes);
+    if (++level.filled < planned) return Status::Ok();
+
+    if (leaf && level.index + 1 < level.nodes) {
+      // A leaf links to its successor, so that page is chosen now.
+      auto allocated = tree.Allocate();
+      if (!allocated.ok()) return allocated.status();
+      level.reserved = allocated.value();
+      level.node.set_next(level.reserved);
+    }
+    auto status = tree.Write(level.node);
+    if (!status.ok()) return status;
+    level.filled = 0;
+    ++level.index;
+    if (at + 1 == levels.size()) {
+      tree.root_ = level.node.id();
+      return Status::Ok();
+    }
+    return add(at + 1, level.lowest, level.node.id());
+  };
+
+  const bool strings = tree.string_keys_;
+  IndexEntry entry;
+  entry.key = strings ? Value::String("") : Value::Int64(0);
+  std::vector<std::byte> previous;
+  uint64_t loaded = 0;
+  for (;; ++loaded) {
+    const std::byte* record = nullptr;
+    auto status = next(&record);
+    if (!status.ok()) return status;
+    if (!record) break;
+    if (!previous.empty() &&
+        CompareRecords(strings, previous.data(), record) >= 0)
+      return Status(StatusCode::kAlreadyExists, "index entry already exists");
+    previous.assign(record, record + RecordBytes(strings, record));
+    if (strings)
+      entry.key.string_value = RecordString(record);
+    else
+      entry.key.int64_value = RecordInteger(record);
+    entry.rid = RecordRid(strings, record);
+    status = add(0, entry, kInvalidPageId);
+    if (!status.ok()) return status;
+  }
+  if (loaded != count_)
+    return Status(StatusCode::kInternal, "index sort lost entries");
+  tree.entries_ = count_;
+  return tree.SaveMetadata();
+}
+
+Status BPlusTree::BulkLoad(std::vector<IndexEntry> entries,
+                           size_t memory_bytes) {
   if (entries_ != 0)
     return Status(StatusCode::kInvalidArgument,
                   "bulk load needs an empty tree");
-  for (const auto& entry : entries) {
-    auto status = CheckKey(entry.key);
+  BulkLoader loader(*this, memory_bytes);
+  for (const IndexEntry& entry : entries) {
+    auto status = loader.Add(entry.key, entry.rid);
     if (!status.ok()) return status;
   }
-  std::erase_if(entries, [](const auto& e) { return e.key.IsNull(); });
-  if (entries.empty()) return Status::Ok();
-  std::sort(entries.begin(), entries.end(), EntryLess);
-  if (std::adjacent_find(entries.begin(), entries.end(),
-                         [](const auto& a, const auto& b) {
-                           return CompareEntries(a, b) == 0;
-                         }) != entries.end())
-    return Status(StatusCode::kAlreadyExists, "index entry already exists");
-
-  // A finished node and its lowest entry, which separates it from its left
-  // sibling in the parent.
-  struct Built {
-    page_id_t id;
-    IndexEntry lowest;
-  };
-  // Leave an eighth of each node free so the first inserts do not split.
-  const size_t fill = capacity_ - capacity_ / 8;
-
-  // Leaves: page IDs are assigned first so each leaf can link to the next.
-  // The first one reuses the empty root page written by Create().
-  size_t groups = GroupCount(entries.size(), fill, capacity_ / 2);
-  std::vector<page_id_t> ids(groups, root_);
-  for (size_t i = 1; i < groups; ++i) {
-    auto id = Allocate();
-    if (!id.ok()) return id.status();
-    ids[i] = id.value();
-  }
-  std::vector<Built> level;
-  auto next = entries.begin();
-  for (size_t i = 0; i < groups; ++i) {
-    const size_t size = entries.size() / groups + (i < entries.size() % groups);
-    Node leaf(*this);
-    leaf.Reset(ids[i], true);
-    if (i + 1 < groups) leaf.set_next(ids[i + 1]);
-    level.push_back({leaf.id(), *next});
-    for (size_t j = 0; j < size; ++j) leaf.Append(*next++);
-    auto status = Write(leaf);
-    if (!status.ok()) return status;
-  }
-
-  // Internal levels, bottom-up, until a single node (the root) remains.
-  while (level.size() > 1) {
-    groups = GroupCount(level.size(), fill + 1, capacity_ / 2 + 1);
-    std::vector<Built> parents;
-    auto child = level.begin();
-    for (size_t i = 0; i < groups; ++i) {
-      const size_t size = level.size() / groups + (i < level.size() % groups);
-      auto id = Allocate();
-      if (!id.ok()) return id.status();
-      Node node(*this);
-      node.Reset(id.value(), false);
-      parents.push_back({node.id(), child->lowest});
-      node.set_first_child(child++->id);
-      for (size_t j = 1; j < size; ++j, ++child)
-        node.Append(child->lowest, child->id);
-      auto status = Write(node);
-      if (!status.ok()) return status;
-    }
-    level = std::move(parents);
-  }
-  root_ = level.front().id;
-  entries_ = entries.size();
-  return SaveMetadata();
+  return loader.Finish();
 }
 
 // Restores the minimum fill of `parent`'s child `at` after an erase left it

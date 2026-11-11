@@ -45,10 +45,44 @@ class BPlusTree {
       BufferPool& pool, const std::string& path, const IndexMetadata& metadata);
   static Result<std::unique_ptr<BPlusTree>> Open(BufferPool& pool,
                                                  const std::string& path);
-  // Builds an empty tree bottom-up from all entries at once (CREATE INDEX):
-  // sorted in memory, then written level by level, far cheaper than one
-  // root-to-leaf insert per entry. NULL keys are skipped, as in Insert.
-  Status BulkLoad(std::vector<IndexEntry> entries);
+  // Builds an empty tree from entries added in any order (CREATE INDEX).
+  // Entries are sorted within a memory budget: each full batch is written to
+  // a temporary file as a sorted run, the runs are merged, and the merged
+  // stream is written bottom-up as nodes 7/8 full. Memory use does not grow
+  // with the table, and it is far cheaper than one root-to-leaf insert per
+  // entry.
+  class BulkLoader {
+   public:
+    explicit BulkLoader(BPlusTree& tree,
+                        size_t memory_bytes = kDefaultSortMemory);
+    ~BulkLoader();
+    // NULL keys are skipped, as in Insert.
+    Status Add(const Value& key, RID rid);
+    Status Finish();
+    // Sorted runs written to disk so far; 0 while everything fits in memory.
+    size_t runs() const { return runs_.size(); }
+
+   private:
+    struct Run {
+      uint64_t offset, bytes;  // within the temporary file
+    };
+    void Sort();
+    Status Spill();
+    Status Build(const std::function<Status(const std::byte**)>& next);
+
+    BPlusTree& tree_;
+    const size_t memory_bytes_;
+    const std::string temp_path_;
+    std::vector<std::byte> arena_;   // buffered records, back to back
+    std::vector<uint32_t> offsets_;  // of each record in arena_; sorted
+    std::vector<Run> runs_;
+    uint64_t spilled_bytes_ = 0;
+    uint64_t count_ = 0;
+  };
+  static constexpr size_t kDefaultSortMemory = 64 << 20;
+  // BulkLoader over a ready-made list.
+  Status BulkLoad(std::vector<IndexEntry> entries,
+                  size_t memory_bytes = kDefaultSortMemory);
   Status Insert(const Value& key, RID rid);
   Status Erase(const Value& key, RID rid);
   // Visits matching entries in key order; the visitor returns false to stop

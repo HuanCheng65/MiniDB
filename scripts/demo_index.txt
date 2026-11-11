@@ -30,5 +30,11 @@ DELETE FROM supplier WHERE s_suppkey = -2;
 SELECT s_suppkey, s_name FROM supplier WHERE s_name = 'IndexChanged';
 PRAGMA index_check(supplier_key);
 PRAGMA index_check(supplier_name);
+-- External merge sort: a 64 KB sort budget cannot hold 10,000 keys, so the
+-- build spills sorted runs to disk and merges them.
+PRAGMA index_sort_memory = 64;
+CREATE INDEX supplier_nation ON supplier(s_nationkey);
+PRAGMA index_check(supplier_nation);
+SELECT s_suppkey, s_nationkey FROM supplier WHERE s_nationkey = 7 LIMIT 3;
 PRAGMA buffer_stats;
 PRAGMA flush;

@@ -38,6 +38,8 @@ Persistent single-column B+ trees now support `INTEGER`, `BIGINT`, `CHAR` and
 maintain the tree, and a SELECT, UPDATE or DELETE whose WHERE column is
 indexed locates its rows through it. Nodes share the
 8 KB page format, checksum I/O and CLOCK buffer pool with heap storage.
+`CREATE INDEX` sorts within a memory budget (`PRAGMA index_sort_memory`),
+spilling sorted runs to disk and merging them, then writes the tree bottom-up.
 `PRAGMA indexes`, `PRAGMA index_tree(ix)` and `PRAGMA index_check(ix)` expose
 the catalog, tree diagram and structural validation. `DROP INDEX ix` removes
 an index; dropping a table removes its indexes.
