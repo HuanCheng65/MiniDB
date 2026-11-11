@@ -4,6 +4,6 @@
     Start 2: minidb_storage
 2/3 Test #2: minidb_storage ...................   Passed    0.02 sec
     Start 3: minidb_index
-3/3 Test #3: minidb_index .....................   Passed    1.27 sec
+3/3 Test #3: minidb_index .....................   Passed    1.31 sec
 100% tests passed, 0 tests failed out of 3
-Total Test time (real) =   1.40 sec
+Total Test time (real) =   1.45 sec

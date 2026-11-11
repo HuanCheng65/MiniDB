@@ -240,6 +240,17 @@ void BulkLoad() {
     REQUIRE(std::filesystem::exists(dir + "/dup2.idx.sort"));
   }
   REQUIRE(!std::filesystem::exists(dir + "/dup2.idx.sort"));
+  // More runs than the budget has read buffers for are merged in passes:
+  // five runs, two at a time, take two passes before the final merge.
+  tree = Take(BPlusTree::Create(pool, dir + "/passes.idx",
+                                {"d", "t", 3, 0, TypeId::kInt64, 0}));
+  {
+    BPlusTree::BulkLoader loader(*tree, 16);
+    for (int i = 4; i >= 0; --i) Ok(loader.Add(Key(i, false), Rid(i)));
+    Ok(loader.Finish());
+    REQUIRE(loader.runs() == 5 && loader.merge_passes() == 2);
+  }
+  CheckModel(*tree, {0, 1, 2, 3, 4}, false, 2);
   std::filesystem::remove_all(dir);
 }
 

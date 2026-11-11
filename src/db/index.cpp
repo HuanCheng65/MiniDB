@@ -100,7 +100,7 @@ Status Database::ExecuteCreateIndex(Statement* statement, Transaction* txn,
     fs::remove(temporary, ignored);
     return failure;
   };
-  size_t sort_runs = 0;
+  size_t sort_runs = 0, merge_passes = 0;
   {
     BPlusTree::BulkLoader loader(*tree, config_.index_sort_memory);
     auto iterator = table->heap->Scan(txn);
@@ -117,6 +117,7 @@ Status Database::ExecuteCreateIndex(Statement* statement, Transaction* txn,
     s = loader.Finish();
     if (!s.ok()) return cleanup(s);
     sort_runs = loader.runs();
+    merge_passes = loader.merge_passes() + 1;
   }
   const auto count = tree->size();
   s = pool_->FlushAll();
@@ -129,12 +130,14 @@ Status Database::ExecuteCreateIndex(Statement* statement, Transaction* txn,
   auto opened = BPlusTree::Open(*pool_, path.string());
   if (!opened.ok()) return opened.status();
   indexes_.emplace(name, opened.TakeValue());
-  result->message = "CREATE INDEX " + name + " (B+ tree, " +
-                    std::to_string(count) + " entries, " +
-                    (sort_runs ? "external sort: " + std::to_string(sort_runs) +
-                                     " runs merged"
-                               : std::string("sorted in memory")) +
-                    ")";
+  result->message =
+      "CREATE INDEX " + name + " (B+ tree, " + std::to_string(count) +
+      " entries, " +
+      (sort_runs ? "external sort: " + std::to_string(sort_runs) +
+                       " runs merged in " + std::to_string(merge_passes) +
+                       (merge_passes == 1 ? " pass" : " passes")
+                 : std::string("sorted in memory")) +
+      ")";
   return Status::Ok();
 }
 

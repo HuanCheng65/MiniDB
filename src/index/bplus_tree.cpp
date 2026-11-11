@@ -95,7 +95,8 @@ int CompareRecords(bool strings, const std::byte* a, const std::byte* b) {
 // open files.
 class RunReader {
  public:
-  RunReader(uint64_t offset, uint64_t bytes) : offset_(offset), left_(bytes) {}
+  RunReader(uint64_t offset, uint64_t bytes, size_t buffer_bytes)
+      : offset_(offset), left_(bytes), buffer_bytes_(buffer_bytes) {}
 
   // The record at the front of the run; null once the run is exhausted.
   const std::byte* current() const { return current_; }
@@ -116,7 +117,7 @@ class RunReader {
   // Makes at least `need` unread bytes available at begin_.
   Status Fill(std::ifstream& file, size_t need) {
     if (end_ - begin_ >= need) return Status::Ok();
-    if (buffer_.empty()) buffer_.resize(kBufferBytes);
+    if (buffer_.empty()) buffer_.resize(buffer_bytes_);
     std::memmove(buffer_.data(), buffer_.data() + begin_, end_ - begin_);
     end_ -= begin_;
     begin_ = 0;
@@ -133,13 +134,65 @@ class RunReader {
     return Status::Ok();
   }
 
-  static constexpr size_t kBufferBytes = 64 * 1024;  // above the longest record
   uint64_t offset_;  // of the next unread byte in the file
   uint64_t left_;    // bytes of this run not yet read from the file
+  size_t buffer_bytes_;
   std::vector<std::byte> buffer_;
   size_t begin_ = 0, end_ = 0;
   const std::byte* current_ = nullptr;
 };
+
+// Merges sorted runs: a heap orders the runs by their front record.
+class RunMerger {
+ public:
+  RunMerger(std::ifstream& file, bool strings, std::vector<RunReader> runs)
+      : file_(file), strings_(strings), runs_(std::move(runs)) {}
+
+  // The next record in (key, RID) order, valid until the following call;
+  // null when every run is exhausted.
+  Status Next(const std::byte** record) {
+    if (!started_) {
+      started_ = true;
+      for (size_t i = 0; i < runs_.size(); ++i) {
+        auto status = Push(i);
+        if (!status.ok()) return status;
+      }
+    } else if (!heap_.empty()) {
+      // The record handed out last time has been consumed: move its run on.
+      std::pop_heap(heap_.begin(), heap_.end(), later_);
+      const size_t run = heap_.back();
+      heap_.pop_back();
+      auto status = Push(run);
+      if (!status.ok()) return status;
+    }
+    *record = heap_.empty() ? nullptr : runs_[heap_.front()].current();
+    return Status::Ok();
+  }
+
+ private:
+  Status Push(size_t run) {
+    auto status = runs_[run].Advance(file_, strings_);
+    if (!status.ok() || !runs_[run].current()) return status;
+    heap_.push_back(run);
+    std::push_heap(heap_.begin(), heap_.end(), later_);
+    return Status::Ok();
+  }
+
+  std::ifstream& file_;
+  bool strings_;
+  std::vector<RunReader> runs_;
+  std::vector<size_t> heap_;  // run indexes, smallest front record on top
+  std::function<bool(size_t, size_t)> later_ = [this](size_t a, size_t b) {
+    return CompareRecords(strings_, runs_[a].current(), runs_[b].current()) > 0;
+  };
+  bool started_ = false;
+};
+
+// Read buffer of one run during a merge: an eighth of the sort budget, but
+// at least two of the longest records and at most 64 KB.
+size_t MergeBufferBytes(size_t memory_bytes) {
+  return std::clamp<size_t>(memory_bytes / 8, 8 * 1024, 64 * 1024);
+}
 
 // Splits `count` items into the fewest groups of at most `target` items, then
 // drops groups while an even split would leave them below `minimum`.
@@ -573,7 +626,9 @@ BPlusTree::BulkLoader::BulkLoader(BPlusTree& tree, size_t memory_bytes)
 
 BPlusTree::BulkLoader::~BulkLoader() {
   std::error_code ignored;
-  if (!runs_.empty()) std::filesystem::remove(temp_path_, ignored);
+  if (spilled_runs_ == 0) return;
+  std::filesystem::remove(temp_path_, ignored);
+  std::filesystem::remove(temp_path_ + ".merge", ignored);
 }
 
 Status BPlusTree::BulkLoader::Add(const Value& key, RID rid) {
@@ -638,6 +693,7 @@ Status BPlusTree::BulkLoader::Spill() {
   file.close();
   if (!file) return Status(StatusCode::kIoError, "cannot write index sort run");
   runs_.push_back({spilled_bytes_, bytes});
+  ++spilled_runs_;
   spilled_bytes_ += bytes;
   arena_.clear();
   offsets_.clear();
@@ -666,35 +722,62 @@ Status BPlusTree::BulkLoader::Finish() {
   arena_ = {};
   offsets_ = {};
 
-  // K-way merge: a heap holds the runs ordered by their front record.
-  const bool strings = tree_.string_keys_;
+  // The budget also bounds the merge: it pays for one read buffer per run, so
+  // when there are more runs than buffers, groups of runs are first merged
+  // into longer runs until one final merge can feed the build.
+  const size_t buffer_bytes = MergeBufferBytes(memory_bytes_);
+  const size_t fan_in = std::max<size_t>(memory_bytes_ / buffer_bytes, 2);
+  while (runs_.size() > fan_in) {
+    auto status = MergePass(fan_in, buffer_bytes);
+    if (!status.ok()) return status;
+  }
   std::ifstream file(temp_path_, std::ios::binary);
   std::vector<RunReader> readers;
-  for (const Run& run : runs_) readers.emplace_back(run.offset, run.bytes);
-  const auto later = [&](size_t a, size_t b) {
-    return CompareRecords(strings, readers[a].current(), readers[b].current()) >
-           0;
-  };
-  std::priority_queue<size_t, std::vector<size_t>, decltype(later)> heap(later);
-  for (size_t i = 0; i < readers.size(); ++i) {
-    auto status = readers[i].Advance(file, strings);
-    if (!status.ok()) return status;
-    if (readers[i].current()) heap.push(i);
-  }
-  bool started = false;
-  return Build([&](const std::byte** record) {
-    if (started) {
-      // The record handed out last time has been consumed: move its run on.
-      const size_t run = heap.top();
-      heap.pop();
-      auto status = readers[run].Advance(file, strings);
-      if (!status.ok()) return status;
-      if (readers[run].current()) heap.push(run);
+  for (const Run& run : runs_)
+    readers.emplace_back(run.offset, run.bytes, buffer_bytes);
+  RunMerger merger(file, tree_.string_keys_, std::move(readers));
+  return Build([&](const std::byte** record) { return merger.Next(record); });
+}
+
+// Rewrites the temporary file with every `fan_in` consecutive runs merged
+// into one.
+Status BPlusTree::BulkLoader::MergePass(size_t fan_in, size_t buffer_bytes) {
+  const bool strings = tree_.string_keys_;
+  const std::string merged_path = temp_path_ + ".merge";
+  std::vector<Run> merged;
+  {
+    std::ifstream input(temp_path_, std::ios::binary);
+    std::ofstream output(merged_path, std::ios::binary | std::ios::trunc);
+    uint64_t offset = 0;
+    for (size_t first = 0; first < runs_.size(); first += fan_in) {
+      std::vector<RunReader> readers;
+      for (size_t i = first; i < std::min(first + fan_in, runs_.size()); ++i)
+        readers.emplace_back(runs_[i].offset, runs_[i].bytes, buffer_bytes);
+      RunMerger merger(input, strings, std::move(readers));
+      uint64_t bytes = 0;
+      for (;;) {
+        const std::byte* record = nullptr;
+        auto status = merger.Next(&record);
+        if (!status.ok()) return status;
+        if (!record) break;
+        const size_t size = RecordBytes(strings, record);
+        output.write(reinterpret_cast<const char*>(record),
+                     static_cast<std::streamsize>(size));
+        bytes += size;
+      }
+      merged.push_back({offset, bytes});
+      offset += bytes;
     }
-    started = true;
-    *record = heap.empty() ? nullptr : readers[heap.top()].current();
-    return Status::Ok();
-  });
+    output.close();
+    if (!output)
+      return Status(StatusCode::kIoError, "cannot write index sort run");
+  }
+  std::error_code error;
+  std::filesystem::rename(merged_path, temp_path_, error);
+  if (error) return Status(StatusCode::kIoError, error.message());
+  runs_ = std::move(merged);
+  ++merge_passes_;
+  return Status::Ok();
 }
 
 // Writes the tree bottom-up from the sorted record stream `next`. The entry

@@ -60,7 +60,10 @@ class BPlusTree {
     Status Add(const Value& key, RID rid);
     Status Finish();
     // Sorted runs written to disk so far; 0 while everything fits in memory.
-    size_t runs() const { return runs_.size(); }
+    size_t runs() const { return spilled_runs_; }
+    // Passes that merged groups of runs because there were more runs than
+    // the budget has read buffers for; the final merge is not counted.
+    size_t merge_passes() const { return merge_passes_; }
 
    private:
     struct Run {
@@ -68,6 +71,7 @@ class BPlusTree {
     };
     void Sort();
     Status Spill();
+    Status MergePass(size_t fan_in, size_t buffer_bytes);
     Status Build(const std::function<Status(const std::byte**)>& next);
 
     BPlusTree& tree_;
@@ -77,6 +81,8 @@ class BPlusTree {
     std::vector<uint32_t> offsets_;  // of each record in arena_; sorted
     std::vector<Run> runs_;
     uint64_t spilled_bytes_ = 0;
+    size_t spilled_runs_ = 0;
+    size_t merge_passes_ = 0;
     uint64_t count_ = 0;
   };
   static constexpr size_t kDefaultSortMemory = 64 << 20;

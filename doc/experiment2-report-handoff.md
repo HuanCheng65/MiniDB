@@ -60,8 +60,9 @@ ctest --test-dir build --output-on-failure
 | `l_orderkey` INTEGER | 64 MB（默认） | 2 | 3.6 s | 74 MB |
 | `l_shipinstruct` CHAR(25) | 64 MB（默认） | 3 | 5.9 s | 71 MB |
 | `l_shipinstruct` CHAR(25) | 8 MB | 20 | 5.4 s | 18 MB |
+| `l_orderkey` INTEGER | 64 KB | 1,710（4 趟归并） | 4.6 s | 12 MB |
 
-两棵树高度均为 3（15,272 和 31,585 个节点），`index_check` 通过，之后的索引查找和删除维护正常。作为对照，不设内存上限、全部在内存排序的早期版本在同样数据上峰值为 600–794 MB。`scripts/demo_index.txt` 末尾用 64 KB 预算在 supplier 上演示了落盘归并（消息显示 `external sort: 3 runs merged`）。
+两棵树高度均为 3（15,272 和 31,585 个节点），`index_check` 通过，之后的索引查找和删除维护正常。作为对照，不设内存上限、全部在内存排序的早期版本在同样数据上峰值为 600–794 MB。`scripts/demo_index.txt` 末尾用 64 KB 预算在 supplier 上演示了落盘归并（消息显示 `external sort: 3 runs merged in 1 pass`）。不建索引时进程本身约 9 MB。
 
 重开后按两种键分别核对所有源记录，共 **20,000 次点查找**，全部一致。范围查询与全表扫描结果一致。插入、修改键、修改名称、删除及再次重开全部通过。验收程序第二次打开数据库后累计缓冲统计为 `miss=1022, evict=1020, flush=36`；这些计数覆盖该会话的查找、重建及 DML，不是单条查询的 I/O 次数。
 
@@ -131,4 +132,4 @@ ctest --test-dir build --output-on-failure
 
 ## 写作时保留的实现边界
 
-当前支持单列、非唯一索引；不支持联合/唯一索引、FLOAT/DECIMAL/DATE 索引、并发写树和崩溃恢复。NULL 不入索引；字符声明长度最多 4000 字节。SELECT、UPDATE、DELETE 的 WHERE 列有索引时都用索引定位行（`!=` 除外），语句消息显示 `INDEX SCAN name`。`CREATE INDEX` 用外部归并排序批量建树：排序内存有上限（默认 64 MB，`PRAGMA index_sort_memory = <KB>` 可调），超出时把已排序的一批写成临时文件里的有序段，最后多路归并；建树内存与表的大小无关。正常关闭/重开有完整验证，不能写成已经实现 WAL 或完整事务原子性。树图为可读性截取展示，结构校验检查的是完整树。
+当前支持单列、非唯一索引；不支持联合/唯一索引、FLOAT/DECIMAL/DATE 索引、并发写树和崩溃恢复。NULL 不入索引；字符声明长度最多 4000 字节。SELECT、UPDATE、DELETE 的 WHERE 列有索引时都用索引定位行（`!=` 除外），语句消息显示 `INDEX SCAN name`。`CREATE INDEX` 用外部归并排序批量建树：排序内存有上限（默认 64 MB，`PRAGMA index_sort_memory = <KB>` 可调，只对当前会话有效，不持久化），超出时把已排序的一批写成临时文件里的有序段，再多路归并；有序段多于预算能负担的读缓冲数时先做多趟归并。建树内存由预算决定，与表的大小无关。正常关闭/重开有完整验证，不能写成已经实现 WAL 或完整事务原子性。树图为可读性截取展示，结构校验检查的是完整树。
